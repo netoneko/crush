@@ -190,6 +190,13 @@ func setupApp(cmd *cobra.Command) (*app.App, error) {
 		return nil, err
 	}
 
+	if debug {
+		fmt.Fprintf(os.Stderr, "crush: debug: ResolveCwd returned: %q\n", cwd)
+		if realCwd, err := os.Getwd(); err == nil {
+			fmt.Fprintf(os.Stderr, "crush: debug: actual os.Getwd() is: %q\n", realCwd)
+		}
+	}
+
 	store, err := config.Init(cwd, dataDir, debug)
 	if err != nil {
 		return nil, err
@@ -200,6 +207,10 @@ func setupApp(cmd *cobra.Command) (*app.App, error) {
 		cfg.Permissions = &config.Permissions{}
 	}
 	cfg.Permissions.SkipRequests = yolo
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "crush: debug: cfg.Options.DataDirectory is: %q\n", cfg.Options.DataDirectory)
+	}
 
 	if err := createDotCrushDir(cfg.Options.DataDirectory); err != nil {
 		return nil, err
@@ -279,8 +290,20 @@ func ResolveCwd(cmd *cobra.Command) (string, error) {
 }
 
 func createDotCrushDir(dir string) error {
+	debug := os.Getenv("CRUSH_DEBUG") != "" || strings.Contains(strings.Join(os.Args, " "), "--debug")
+	if debug {
+		fmt.Fprintf(os.Stderr, "crush: debug: createDotCrushDir(%q)\n", dir)
+	}
+
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "crush: debug: MkdirAll(%q) FAILED: %v\n", dir, err)
+		}
 		return fmt.Errorf("failed to create data directory: %q %w", dir, err)
+	}
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "crush: debug: MkdirAll(%q) SUCCESS\n", dir)
 	}
 
 	gitIgnorePath := filepath.Join(dir, ".gitignore")
