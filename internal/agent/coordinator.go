@@ -19,6 +19,7 @@ import (
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
 	"github.com/charmbracelet/crush/internal/agent/hyper"
+	"github.com/charmbracelet/crush/internal/agent/memory"
 	"github.com/charmbracelet/crush/internal/agent/notify"
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/agent/tools"
@@ -107,6 +108,11 @@ type coordinator struct {
 	activeSkills []*skills.Skill // Post-filter: active skills only.
 	skillTracker *skills.Tracker
 
+	// memoryStore is non-nil when EnableMemory is true (the default).
+	// It persists across buildTools rebuilds so reference IDs remain valid
+	// after model switches within a session.
+	memoryStore memory.Store
+
 	readyWg errgroup.Group
 }
 
@@ -136,6 +142,11 @@ func NewCoordinator(
 	}
 	skillTracker := skills.NewTracker(activeSkills)
 
+	var memStore memory.Store
+	if opts := cfg.Config().Options; opts == nil || opts.EnableMemory == nil || *opts.EnableMemory {
+		memStore = memory.NewInMemoryStore()
+	}
+
 	c := &coordinator{
 		cfg:          cfg,
 		sessions:     sessions,
@@ -150,6 +161,7 @@ func NewCoordinator(
 		allSkills:    allSkills,
 		activeSkills: activeSkills,
 		skillTracker: skillTracker,
+		memoryStore:  memStore,
 	}
 
 	agentCfg, ok := cfg.Config().Agents[config.AgentCoder]
@@ -608,6 +620,30 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 	slices.SortFunc(filteredTools, func(a, b fantasy.AgentTool) int {
 		return strings.Compare(a.Info().Name, b.Info().Name)
 	})
+
+	// Wrap all tools with memory interception and inject query tools when
+	// memory is enabled. Memory tools are appended after sorting so their
+	// names don't need to participate in the AllowedTools filter — they are
+	// always available when memory is enabled.
+	if c.memoryStore != nil {
+		wrapCfg := memory.DefaultWrapConfig()
+		if cfgOpts := c.cfg.Config().Options; cfgOpts != nil {
+			if cfgOpts.MemoryHardLimitBytes > 0 {
+				wrapCfg.HardLimit = cfgOpts.MemoryHardLimitBytes
+			}
+			if cfgOpts.MemoryOverspill != nil {
+				wrapCfg.Overspill = *cfgOpts.MemoryOverspill
+			}
+			if cfgOpts.MemoryPreviewLines > 0 {
+				wrapCfg.PreviewLines = cfgOpts.MemoryPreviewLines
+			}
+		}
+		filteredTools = memory.WrapWithMemory(filteredTools, c.memoryStore, wrapCfg)
+		filteredTools = append(filteredTools,
+			memory.NewMemoryListTool(c.memoryStore),
+			memory.NewMemoryScrollTool(c.memoryStore),
+		)
+	}
 
 	// Wrap tools with hook interception for the top-level agent only.
 	// Sub-agents (the `agent` task tool, `agentic_fetch`, etc.) run

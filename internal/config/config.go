@@ -281,6 +281,12 @@ type Options struct {
 	DisableNotifications      bool         `json:"disable_notifications,omitempty" jsonschema:"description=Deprecated: Use notification_style instead. Disable desktop notifications,default=false"`
 	NotificationStyle         string       `json:"notification_style,omitempty" jsonschema:"description=Notification style to use. Options: auto (default), native, osc, bell, disabled. Auto selects based on environment: native for local sessions, osc for SSH (with automatic OSC 99/777 detection).,enum=auto,enum=native,enum=osc,enum=bell,enum=disabled,default=auto"`
 	DisabledSkills            []string     `json:"disabled_skills,omitempty" jsonschema:"description=List of skill names to disable and hide from the agent,example=crush-config"`
+	// Memory controls automatic storage of large tool results so the model
+	// can query them later without re-reading the full output.
+	EnableMemory         *bool    `json:"enable_memory,omitempty" jsonschema:"description=Store large tool results in memory for later retrieval via memory_list and memory_scroll. Enabled by default.,default=true"`
+	MemoryHardLimitBytes int      `json:"memory_hard_limit_bytes,omitempty" jsonschema:"description=Byte length above which tool results are stored in memory (default 8192)"`
+	MemoryOverspill      *float64 `json:"memory_overspill,omitempty" jsonschema:"description=Fraction of the hard limit tolerated inline before storing — e.g. 0.20 means up to hard_limit*1.20 is kept inline (default 0.20)"`
+	MemoryPreviewLines   int      `json:"memory_preview_lines,omitempty" jsonschema:"description=Lines shown in the inline reference summary returned to the model (default 10)"`
 }
 
 type MCPs map[string]MCPConfig
@@ -678,6 +684,8 @@ func allToolNames() []string {
 		"write",
 		"list_mcp_resources",
 		"read_mcp_resource",
+		"memory_list",
+		"memory_scroll",
 	}
 }
 

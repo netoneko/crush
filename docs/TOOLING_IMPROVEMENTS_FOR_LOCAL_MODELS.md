@@ -8,8 +8,14 @@ All results greater than X rows/tokens/size go into memory to create a reference
 
 ## Fix
 
-Crush should store tool results (logs, spans, code search hits) in an in-memory
-store so the LLM can query them later without re-calling rate-limited APIs.
+Crush stores large tool results (logs, grep hits, command output) in a memory
+store so the model receives a compact reference inline and can page through the
+full content on demand via `memory_list` / `memory_scroll`. This caps the byte
+cost of any single tool result and stops stale output from bloating subsequent
+turns.
+
+Phase 1 (in-memory map) is implemented. Phase 2 (SQLite, cross-session) is
+planned.
 
 ## Backends
 
@@ -31,9 +37,43 @@ store so the LLM can query them later without re-calling rate-limited APIs.
   Enabled when:  EnableMemory=true  and  EnableMemorySQL=true  (both default
   to  true ).
 
-### InMemory
+### InMemory — **implemented** (`internal/agent/memory/`)
 
-Just a map, contents lost across sessions. First phase.
+A `sync.RWMutex`-protected map. Contents are lost when the process exits.
+
+Every tool's response is intercepted by a wrapper (`WrapWithMemory`). If the
+response text exceeds the configured threshold the full content is stored and
+the model receives a compact summary instead:
+
+```
+[Large result stored as memory reference mem_42]
+Source: bash | Kind: generic | Bytes: 12483 | Lines: 847
+
+Preview (first 10 lines):
+---
+...
+---
+
+Use memory_scroll(id="mem_42", offset=0, limit=50) to read more.
+```
+
+Exposed tools:
+
+- `memory_list` — list all stored references (ID, source, kind, line count, first-line preview)
+- `memory_scroll` — read a window of lines from a reference (`id`, `offset`, `limit ≤ 200`)
+
+Configuration (`options` block in `crush.json`):
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enable_memory` | `true` | Toggle the feature on/off |
+| `memory_hard_limit_bytes` | `8192` | Byte length above which results are stored |
+| `memory_overspill` | `0.20` | Fraction of the hard limit tolerated inline (20 % → effective limit 9830 B) |
+| `memory_preview_lines` | `10` | Lines shown in the inline reference summary |
+
+The store is created once per coordinator and persists across model switches
+within a session. Reference IDs (`mem_N`) remain valid for the lifetime of the
+process.
 
 ## 1. Tool result truncation (scrolling window)
 
