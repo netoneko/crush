@@ -132,6 +132,86 @@ via CLAUDE.md instructions but a guardrail in the tool itself would be more reli
 
 ---
 
+## Benchmark Run — 2026-05-29 (report_3)
+
+**Task:** Run acceptance playbook `acceptance/01_verify_apk_bootstrap.md` and write results to `tmp/acceptance/01_verify_apk_bootstrap_report_3.md`  
+**Model:** `qwen3-yolo:latest` (Qwen3 35B MoE, Q4_K_M, fully in VRAM ~29 GB)  
+**Inference speed:** ~20 tok/s  
+**Result:** PASS
+
+### Timing
+
+| Metric | Value |
+|--------|-------|
+| Session duration | 18.2 min |
+| LLM requests | 41 |
+| Avg response time | 18.8 s |
+| Min / Max response | 0.0 s / 175.9 s |
+| Total LLM time | ~772 s (~12.9 min) |
+
+The max 175 s response was the initial context load (full playbook + system prompt on first turn).
+
+### Tool call breakdown (92 total)
+
+| Tool | Calls |
+|------|-------|
+| `view` | 35 |
+| `bash` | 31 |
+| `todos` | 18 |
+| `grep` | 6 |
+| `write` | 2 |
+
+`memory_list` / `memory_scroll`: **0** — memory was not used this run (config bug: `enable_memory` was at the wrong nesting level in `crush.json`; fixed after the run).
+
+### Observations
+
+- **Todos worked well.** Qwen autonomously created and ticked off a todo list without being asked, keeping itself on track through the 6-step playbook.
+- **SSH known_hosts friction.** Each run generates a new VM host key. The model handled it by running `sed -i '' '83d' ~/.ssh/known_hosts`, but had to detect the failure first (RC=255). This cost at least 2 extra bash roundtrips per run.
+- **Heavy use of `view`.** 35 `view` calls vs 31 `bash` — the model read files it had already seen (playbook, disk scripts, bootstrap layout). File read deduplication (#2 above) would cut context significantly.
+- **Memory not triggered.** With the default 8 KB threshold and bash outputs being short (apk stdout, ls listings), nothing crossed the threshold even if the config had been correct. A 2 KB threshold would have caught several outputs.
+- **No thinking.** `qwen3-yolo` does not emit `<think>` tags; the `think` config flag has no effect for Ollama-served models (only wired for specific cloud providers).
+
+### Improvements for next run
+
+1. Fix SSH known_hosts: use `-o UserKnownHostsFile=/dev/null` in all acceptance test SSH calls to eliminate the RC=255 noise.
+2. Verify memory is active: check for `[Large result stored as memory reference]` lines in the model's received tool results.
+3. Lower `memory_hard_limit_bytes` to 512–1024 to trigger offloading on typical bash/ls output.
+4. Add a `memory_overspill: 0` option so nothing is tolerated inline above the threshold.
+
+---
+
+## Benchmark Run — 2026-05-29 (report_4, first run with config fix)
+
+**Task:** Same playbook, new session after `enable_memory` config was moved into `options` block.  
+**Result:** PASS
+
+### Comparison: report_3 vs report_4
+
+| Metric | Report 3 (baseline) | Report 4 | Delta |
+|--------|---------------------|----------|-------|
+| Session duration | 18.2 min | 8.1 min | **−55%** |
+| LLM requests | 41 | 17 | −59% |
+| Total tool calls | 92 | 46 | −50% |
+| Avg response time | 18.8 s | 14.0 s | −26% |
+| Max response time | 175.9 s | 48.8 s | −72% |
+| Total LLM time | ~772 s | ~238 s | −69% |
+| `view` calls | 35 | 15 | −57% |
+| `bash` calls | 31 | 14 | −55% |
+| `todos` calls | 18 | 1 | −94% |
+| `ls` calls | 0 | 14 | +14 |
+| `grep` calls | 6 | 6 | 0 |
+| Memory tool calls | 0 | 0 | — |
+
+### Observations
+
+- **Massive speed improvement** despite memory not being active in either run. The model was more direct in report 4, skipping a lot of redundant file reads and todo management.
+- **Todos dropped from 18 → 1.** The model barely used the todo list this time. Either context from the prior run informed a more confident plan, or it was a different random seed. Worth watching across more runs.
+- **`ls` appeared (14 calls) where report 3 used none.** The model switched strategy for directory exploration — possibly more efficient for short listings than `view`.
+- **Max response time dropped from 175 s → 48 s** — the cold-start context penalty was much smaller, suggesting the system prompt / message history was leaner at session start.
+- **Memory still not triggered.** Config fix was applied but crush was already running; the new config takes effect on the next process start. Need to verify in a fresh session.
+
+---
+
 ## 5. Small model name validation at startup
 
 **Problem:** crush.json `models.small` can reference a model that doesn't exist in ollama. The

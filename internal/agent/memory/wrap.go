@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"charm.land/fantasy"
@@ -69,15 +70,18 @@ func (m *memoryTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.To
 	}
 
 	effectiveLimit := float64(m.cfg.HardLimit) * (1 + m.cfg.Overspill)
+	slog.Debug("memory wrap: tool result", "tool", call.Name, "bytes", len(resp.Content), "effective_limit", int(effectiveLimit))
 	if float64(len(resp.Content)) <= effectiveLimit {
 		return resp, nil
 	}
 
 	id, storeErr := m.store.Store(ctx, call.Name, KindGeneric, resp.Content)
 	if storeErr != nil {
+		slog.Warn("memory wrap: store failed", "tool", call.Name, "error", storeErr)
 		// Storage failure is non-fatal: return the original (large) response.
 		return resp, nil
 	}
+	slog.Debug("memory wrap: stored reference", "tool", call.Name, "id", id, "bytes", len(resp.Content))
 
 	lines := strings.Split(resp.Content, "\n")
 	previewEnd := m.cfg.PreviewLines

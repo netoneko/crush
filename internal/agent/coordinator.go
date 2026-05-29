@@ -145,6 +145,23 @@ func NewCoordinator(
 	var memStore memory.Store
 	if opts := cfg.Config().Options; opts == nil || opts.EnableMemory == nil || *opts.EnableMemory {
 		memStore = memory.NewInMemoryStore()
+		hardLimit := 8192
+		overspill := 0.20
+		previewLines := 10
+		if opts != nil {
+			if opts.MemoryHardLimitBytes > 0 {
+				hardLimit = opts.MemoryHardLimitBytes
+			}
+			if opts.MemoryOverspill != nil {
+				overspill = *opts.MemoryOverspill
+			}
+			if opts.MemoryPreviewLines > 0 {
+				previewLines = opts.MemoryPreviewLines
+			}
+		}
+		slog.Debug("memory store enabled", "hard_limit_bytes", hardLimit, "overspill", overspill, "preview_lines", previewLines)
+	} else {
+		slog.Debug("memory store disabled")
 	}
 
 	c := &coordinator{
