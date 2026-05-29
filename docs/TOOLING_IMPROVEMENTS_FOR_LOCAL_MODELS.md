@@ -61,6 +61,7 @@ Exposed tools:
 
 - `memory_list` — list all stored references (ID, source, kind, line count, first-line preview)
 - `memory_scroll` — read a window of lines from a reference (`id`, `offset`, `limit ≤ 200`)
+- `memory_grep` — search within a stored reference by regex (`id`, `pattern`, `context_lines`); prefer over repeated `memory_scroll` calls to keep responses small
 
 Configuration (`options` block in `crush.json`):
 
@@ -508,13 +509,13 @@ Proper markdown structure, correct PASS verdict, but contains `"port 4cap4444"` 
 
 Based on all benchmark runs to date, the following improvements are prioritized for gemma4 usability:
 
-1. **Dedicated file tools** (`write_file`, `edit_file`) — structured `path`/`content` fields, no shell escaping. Eliminates the `"unexpected end of JSON input"` failure class. gemma4 reaches for `bash` because the tool description is more prominent; file tools should be listed first in the system prompt for local models.
+1. ~~**Dedicated file tools** (`write_file`, `edit_file`)~~ **DONE** — `file_write`, `file_edit`, `file_grep` tools added (`internal/agent/tools/file_write.go`, `file_edit.go`, `file_grep.go`). Structured `path`/`content` fields, no shell escaping. Eliminates the `"unexpected end of JSON input"` failure class.
 
-2. **Parse error retry with config knob** — `max_parse_retries: 3`, backoff, correction hint injected per retry, user-visible error on exhaustion. Fixes the silent hang (report_6 failure mode).
+2. ~~**`memory_grep`**~~ **DONE** — `memory_grep(id, pattern, context_lines)` added (`internal/agent/memory/tool_grep.go`). Returns only matching lines with context, replacing high-limit `memory_scroll` calls. Memory reference summaries now hint to use `memory_grep` first.
 
-3. **Task completion self-assessment** — post-write verification step, configurable via `enable_task_verification`. Catches format mismatches (JSON vs markdown) and hallucinations (corrupted values like `4cap4444`) before the session closes.
+3. **Parse error retry with config knob** — `max_parse_retries: 3`, backoff, correction hint injected per retry, user-visible error on exhaustion. Fixes the silent hang (report_6 failure mode).
 
-4. **`memory_grep`** — replace high-limit `memory_scroll` with pattern search. Keeps scroll results small and inline, stops the 40-call re-inflation observed in report_9.
+4. **Task completion self-assessment** — post-write verification step, configurable via `enable_task_verification`. Catches format mismatches (JSON vs markdown) and hallucinations (corrupted values like `4cap4444`) before the session closes.
 
 5. **Context budget per model** — hard eviction at a configurable token limit (e.g. `context_budget: 55000` for gemma4). Drop oldest tool results when approaching the limit. qwen3 handles 70K+ cleanly; gemma4 degrades at ~60K. The budget should be tunable per model in crush.json.
 

@@ -91,9 +91,9 @@ func (m *memoryTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.To
 	preview := strings.Join(lines[:previewEnd], "\n")
 
 	summary := fmt.Sprintf(
-		"[Large result stored as memory reference %s]\nSource: %s | Kind: %s | Bytes: %d | Lines: %d\n\nPreview (first %d lines):\n---\n%s\n---\n\nUse memory_scroll(id=%q, offset=0, limit=50) to read more.",
+		"[Large result stored as memory reference %s]\nSource: %s | Kind: %s | Bytes: %d | Lines: %d\n\nPreview (first %d lines):\n---\n%s\n---\n\nUse memory_grep(id=%q, pattern=\"...\") to search or memory_scroll(id=%q, offset=0, limit=50) to page through the content.",
 		id, call.Name, string(KindGeneric), len(resp.Content), len(lines),
-		previewEnd, preview, id,
+		previewEnd, preview, id, id,
 	)
 
 	return fantasy.NewTextResponse(summary), nil
