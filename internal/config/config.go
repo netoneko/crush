@@ -292,6 +292,11 @@ type Options struct {
 	// tasks that were actually finished and to complete any that are genuinely
 	// unfinished. Disabled by default.
 	EnableTaskSelfAssessment *bool `json:"enable_task_self_assessment,omitempty" jsonschema:"description=After a run that ends with incomplete todos\\, inject a follow-up prompt asking the model to verify and close out finished tasks and complete any that are genuinely unfinished.,default=false"`
+	// CompactTools replaces verbose tool descriptions with shorter versions to
+	// reduce prompt token usage. Useful for local models with smaller context
+	// windows. Affects memory_scroll, memory_list, memory_grep, file_write,
+	// file_edit, and file_grep.
+	CompactTools bool `json:"compact_tools,omitempty" jsonschema:"description=Use shorter tool descriptions to reduce prompt token usage. Useful for local/small-context models.,default=false"`
 }
 
 type MCPs map[string]MCPConfig

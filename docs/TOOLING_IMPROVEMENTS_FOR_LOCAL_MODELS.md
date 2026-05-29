@@ -766,6 +766,84 @@ Report is 6.8KB, well-structured, accurate diagnosis, all workarounds documented
 
 ---
 
+## Benchmark Run — 2026-05-29 (report_15, qwen3-yolo, 01_verify_apk_bootstrap, second clean run with memory + new tools)
+
+**Task:** Run acceptance playbook `acceptance/01_verify_apk_bootstrap.md` and write results to `tmp/acceptance/01_verify_apk_bootstrap_report_14.md`
+**Model:** `qwen3-yolo:latest` (Qwen3 35B MoE, Q4_K_M, ~26.9 GiB VRAM)
+**Crush build:** Patched — memory enabled, `file_write`/`file_edit`/`file_grep`/`memory_grep` added
+**Config:** `enable_memory: true`, `memory_hard_limit_bytes: 2048`
+**Result:** PASS — `01_verify_apk_bootstrap_report_14.md` (3.5 KB, accurate, well-structured)
+
+### Timing
+
+| Metric | Value |
+|--------|-------|
+| Session duration | ~7 min (20:30–20:37 local) |
+| LLM requests | 25 (incl. 2 setup) |
+| Starting prompt | ~12K tokens |
+| Peak prompt | ~14K tokens |
+| Total LLM time | ~225 s (3.75 min) |
+| Avg response time | 9.0 s |
+| Max response time | 55.0 s (report write turn) |
+
+### Tool call breakdown (23 total)
+
+| Tool | Calls |
+|------|-------|
+| `bash` | 10 |
+| `todos` | 7 |
+| `memory_scroll` | 3 |
+| `view` | 1 |
+| `job_output` | 1 |
+| `write` | 1 |
+
+### Memory references stored (2 total)
+
+| ID | Tool | Bytes |
+|----|------|-------|
+| mem_1 | bash | 3,060 |
+| mem_2 | bash | 3,820 |
+
+### Comparison: report_14 → report_15
+
+| Metric | Report_14 (mem + tools) | Report_15 (second run) | Delta |
+|--------|-------------------------|------------------------|-------|
+| Session duration | ~7 min | ~7 min | 0 |
+| LLM requests | 30 | 25 | −17% |
+| Total tool calls | 27 | 23 | −15% |
+| Avg response time | 6.4 s | 9.0 s | +41% |
+| Max response time | 32.0 s | 55.0 s | +72% |
+| Starting prompt | ~12K tokens | ~12K tokens | 0 |
+| Peak prompt | ~22K tokens | ~14K tokens | **−36%** |
+| Total LLM time | 192 s | 225 s | +17% |
+| Memory refs stored | 5 | 2 | −60% |
+| `memory_scroll` calls | 0 | **3** | first use |
+| `bash` calls | 16 | 10 | −37% |
+| `todos` calls | 5 | 7 | +40% |
+| `view` calls | 1 | 1 | 0 |
+| Parse errors | 0 | 0 | 0 |
+
+### Observations
+
+- **PASS with good quality report** (3.5 KB, well-structured, exact output matching, all steps documented). SSH known_hosts conflict handled correctly via `StrictHostKeyChecking=no`. All expected apk output matched exactly.
+
+- **Peak prompt dropped to 14K tokens** — down from 22K in report_14, despite the same task. Fewer large bash outputs this run (only 2 mem refs vs 5), suggesting the VM state was warmer or SSH commands returned shorter output.
+
+- **`memory_scroll` used for the first time (3 calls).** Unlike report_14 where memory was offloaded and forgotten, this session had the model read back stored content. Still well-controlled — 3 scroll calls vs 40 in report_9's Docker chaos run.
+
+- **Max response time 55 s on the write turn.** The model generated a full markdown report in a single response. This is the `"unexpected end of JSON input"` risk window for gemma4 — a 55 s bash-embedded generation would truncate. On qwen3 it completed cleanly.
+
+- **Fewer total tool calls (23 vs 27) with the same result.** The model was more direct; fewer diagnostic bash calls. Todo management increased slightly (7 vs 5).
+
+- **Higher avg response time (9.0 s vs 6.4 s).** Variance in VM SSH response times and/or colder KV cache. Not a model regression.
+
+### Improvements for next run
+
+1. **Track `memory_scroll` count as a health metric.** 3 is fine; 40 (report_9) is a context leak. Consider logging the count at session end.
+2. **Try `compact_tools: true`** — new config flag that reduces tool description tokens. Expected to save ~200–400 tokens from tool schema overhead per session. Measure impact on next run.
+
+---
+
 ## Planned fixes (priority order)
 
 Based on all benchmark runs to date, the following improvements are prioritized for gemma4 usability:

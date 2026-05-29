@@ -691,6 +691,11 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 		return strings.Compare(a.Info().Name, b.Info().Name)
 	})
 
+	compact := c.cfg.Config().Options != nil && c.cfg.Config().Options.CompactTools
+	if compact {
+		filteredTools = tools.ApplyCompact(filteredTools)
+	}
+
 	// Wrap all tools with memory interception and inject query tools when
 	// memory is enabled. Memory tools are appended after sorting so their
 	// names don't need to participate in the AllowedTools filter — they are
@@ -709,11 +714,15 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			}
 		}
 		filteredTools = memory.WrapWithMemory(filteredTools, c.memoryStore, wrapCfg)
-		filteredTools = append(filteredTools,
+		memoryTools := []fantasy.AgentTool{
 			memory.NewMemoryListTool(c.memoryStore),
 			memory.NewMemoryScrollTool(c.memoryStore),
 			memory.NewMemoryGrepTool(c.memoryStore),
-		)
+		}
+		if compact {
+			memoryTools = memory.ApplyCompact(memoryTools)
+		}
+		filteredTools = append(filteredTools, memoryTools...)
 	}
 
 	// Wrap tools with hook interception for the top-level agent only.
