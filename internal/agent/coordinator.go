@@ -712,6 +712,12 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			if cfgOpts.MemoryPreviewLines > 0 {
 				wrapCfg.PreviewLines = cfgOpts.MemoryPreviewLines
 			}
+			if len(cfgOpts.MemoryRefuseTools) > 0 {
+				wrapCfg.ToolStrategies = make(map[string]memory.ToolStrategy, len(cfgOpts.MemoryRefuseTools))
+				for _, name := range cfgOpts.MemoryRefuseTools {
+					wrapCfg.ToolStrategies[name] = memory.StrategyRefuse
+				}
+			}
 		}
 		filteredTools = memory.WrapWithMemory(filteredTools, c.memoryStore, wrapCfg)
 		memoryTools := []fantasy.AgentTool{

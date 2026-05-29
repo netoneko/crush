@@ -287,6 +287,10 @@ type Options struct {
 	MemoryHardLimitBytes int      `json:"memory_hard_limit_bytes,omitempty" jsonschema:"description=Byte length above which tool results are stored in memory (default 8192)"`
 	MemoryOverspill      *float64 `json:"memory_overspill,omitempty" jsonschema:"description=Fraction of the hard limit tolerated inline before storing — e.g. 0.20 means up to hard_limit*1.20 is kept inline (default 0.20)"`
 	MemoryPreviewLines   int      `json:"memory_preview_lines,omitempty" jsonschema:"description=Lines shown in the inline reference summary returned to the model (default 10)"`
+	// MemoryRefuseTools lists tool names that use the refuse strategy: instead
+	// of storing oversized results, the model receives an error telling it to
+	// re-call the tool with narrower parameters (e.g. view with offset/limit).
+	MemoryRefuseTools []string `json:"memory_refuse_tools,omitempty" jsonschema:"description=Tool names that reject oversized results instead of storing them. The model is told to re-call with narrower parameters (e.g. view with offset/limit)."`
 	// EnableTaskSelfAssessment injects a follow-up prompt after every run that
 	// ends with incomplete todos, asking the model to verify and close out any
 	// tasks that were actually finished and to complete any that are genuinely

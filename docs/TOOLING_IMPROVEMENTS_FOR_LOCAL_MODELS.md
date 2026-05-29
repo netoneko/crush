@@ -844,20 +844,214 @@ Report is 6.8KB, well-structured, accurate diagnosis, all workarounds documented
 
 ---
 
+## Benchmark Run — 2026-05-29 (report_16, qwen3-yolo, 01_verify_apk_bootstrap, compact_tools enabled)
+
+**Task:** Run acceptance playbook `acceptance/01_verify_apk_bootstrap.md` and write results to `tmp/acceptance/01_verify_apk_bootstrap_report_15.md`
+**Model:** `qwen3-yolo:latest` (Qwen3 35B MoE, Q4_K_M, ~26.9 GiB VRAM)
+**Crush build:** Patched — memory + new tools + `compact_tools: true`
+**Config:** `enable_memory: true`, `memory_hard_limit_bytes: 2048`, `compact_tools: true`
+**Result:** FAIL — model went into akuma source code archaeology; report never written
+
+### Timing (two-part session, same session ID)
+
+| Metric | Part 1 | Part 2 (after nudge) |
+|--------|--------|----------------------|
+| Start | 23:15:46 | 23:27:43 |
+| End | 23:22 | 23:29:29 |
+| LLM time | 4m45s | 6m13s |
+| Turns | 23 | 8 |
+| Starting prompt | **10,343 tokens** | 20,380 tokens (reloaded history) |
+| Peak prompt | 16,490 tokens | 21,557 tokens |
+
+### Tool call breakdown (part 1, 25 total)
+
+| Tool | Calls |
+|------|-------|
+| `bash` | 14 |
+| `view` | 3 |
+| `todos` | 3 |
+| `ls` | 2 |
+| `job_kill` | 1 |
+| `job_output` | 1 |
+| `edit` | 1 |
+
+### Memory references stored (4 total across both parts)
+
+| Part | ID | Tool | Bytes |
+|------|----|------|-------|
+| 1 | mem_1 | view | 3,718 |
+| 1 | mem_2 | view | 3,103 |
+| 1 | mem_3 | bash | 3,060 |
+| 2 | mem_5 | view | 3,181 |
+
+### Compact tools: starting prompt reduction
+
+The compact descriptions reduced the starting prompt from ~12,197 tokens (report_14) to **10,343 tokens** — a **−15% reduction** from tool schema alone. The savings are real and consistent.
+
+### Failure mode: archaeology loop
+
+Part 2's last 3 tool calls:
+1. `view(src/ssh/keys.rs)` → 3.1KB stored as mem_5
+2. `bash: grep -n "panic|PANIC" src/ssh/keys.rs` → no results
+3. `bash: ls bootstrap/etc/` → listing
+
+The model hit something during the acceptance run (likely an SSH error or unexpected output), switched into debugging mode, and started reading akuma kernel source instead of following the playbook. The final 720-token response was an explanation of findings, not a report write.
+
+This is the same archaeology loop seen in report_12 (qwen3 on `02_git_clone`). The trigger is any unexpected tool result that the model can't map to playbook instructions — it then falls back to "investigate the system" as a goal rather than "document what I found and move on."
+
+### Comparison: report_14 → report_15 → report_16
+
+| Metric | Report_14 | Report_15 | Report_16 |
+|--------|-----------|-----------|-----------|
+| Result | PASS | PASS | **FAIL** |
+| compact_tools | no | no | **yes** |
+| Starting prompt | ~12,197 | ~12,197 | **10,343** |
+| Peak prompt | ~22K | ~14K | 16,490 |
+| Session duration | ~7 min | ~7 min | ~14 min (incl. nudge) |
+| Parse errors | 0 | 0 | 0 |
+| Archaeology | no | no | **yes** |
+
+### Observations
+
+- **−15% starting prompt from compact tools** — measured, real, consistent. No model behavior regression from shorter descriptions; qwen3 used all tools correctly.
+- **Archaeology loop is the primary failure mode for qwen3** on this playbook, not context pressure or parse errors. The model is robust to token load; it's not robust to unexpected SSH behavior.
+- **Nudge was not enough.** User prompted continuation after part 1; the model restarted but continued investigating rather than pivoting to the report.
+- **Todos not used in this run.** The todos enforcement fix (reject >1 in_progress) could not be tested here.
+
+### Improvements for next run
+
+1. **Add playbook escape clause**: "If any SSH step fails or returns unexpected output, document the error verbatim and proceed to the next step. Do not investigate the akuma source code."
+2. **Set a hard step budget**: "Complete all steps within N bash calls. If not finished by step N, write a partial report."
+3. **Enable `enable_task_self_assessment`** in crush.json — would fire after a clean session end with incomplete todos, prompting the model to write the report.
+
+---
+
+## Benchmark Run — 2026-05-29 (report_17, qwen3-yolo, 01_verify_apk_bootstrap, compact_tools + taskmaster)
+
+**Task:** Run acceptance playbook `acceptance/01_verify_apk_bootstrap.md` and write results to `tmp/acceptance/01_verify_apk_bootstrap_report_16.md`
+**Model:** `qwen3-yolo:latest` (Qwen3 35B MoE, Q4_K_M, ~26.9 GiB VRAM)
+**Crush build:** Patched — memory + new tools + `compact_tools: true` + `enable_task_self_assessment: true`
+**Config:** `enable_memory: true`, `memory_hard_limit_bytes: 2048`, `compact_tools: true`
+**Result:** PASS — `01_verify_apk_bootstrap_report_16.md` (4.2 KB, accurate, well-structured)
+
+### Timing
+
+| Metric | Value |
+|--------|-------|
+| Session start | 23:44:55 |
+| Report written | 23:53:23 |
+| Session duration | ~9 min |
+| Starting prompt | **10,391 tokens** |
+| Peak prompt | **20,753 tokens** |
+| Turns | 27 (main) + 1 self-assessment |
+| LLM time | ~7 min |
+
+### Token progression
+
+| Time | Input | Output | Notes |
+|------|-------|--------|-------|
+| 23:46:08 | 10,391 | 228 | First real turn |
+| 23:47:08 | 12,705 | 442 | apk install |
+| 23:49:11 | 15,546 | 234 | |
+| 23:50:22 | 16,880 | 511 | busybox verification attempts |
+| 23:51:36 | 18,195 | 542 | |
+| 23:53:23 | 19,401 | **1,320** | Report write |
+| 23:53:38 | **20,753** | **133** | Self-assessment (taskmaster) |
+
+### Tool call breakdown (27 total)
+
+| Tool | Calls |
+|------|-------|
+| `bash` | 16+ |
+| `ls` | 2 |
+| `view` | 1 |
+| `write` | 1 |
+
+Memory refs: 2 stored (bash 3.1KB at 23:47, bash 4.2KB at 23:48); neither scrolled back.
+
+### Taskmaster confirmed firing
+
+After the report write turn (1,320 output tokens), the next turn shows input jumping from 19,401 → 20,753 (+1,352 tokens) with only 133 output. The +1,352 matches the injected report content plus the self-assessment prompt. The 133-token response is the model confirming completion. No further turns — session ended cleanly.
+
+### Key discovery: `busybox sh -c` fails, `busybox echo` works
+
+The playbook step "verify busybox works" expects output `busybox OK`. The model tried `busybox sh -c 'echo busybox_OK'` → rc=255 (mini-shell doesn't forward `sh -c` syntax). After 3 failed attempts it discovered `busybox echo busybox_OK` → output `busybox_OK`. The mini-shell treats unknown commands as passthrough to binary with argv, so `busybox arg1 arg2` works while `sh -c '...'` does not.
+
+The model correctly documented this in the report as a platform behavior note rather than a failure.
+
+### Report used `write` tool, not bash
+
+The model called `write(file_path=..., content=...)` directly — the structured file tool — rather than embedding content in a bash heredoc. No JSON truncation risk. This validates the `file_write`/`write` tooling approach.
+
+### Comparison: report_14 → report_15 → report_16 (fail) → report_17
+
+| Metric | R14 | R15 | R16 | R17 |
+|--------|-----|-----|-----|-----|
+| Result | PASS | PASS | FAIL | **PASS** |
+| compact_tools | no | no | yes | yes |
+| taskmaster | no | no | no | **yes** |
+| Starting prompt | ~12,197 | ~12,197 | 10,343 | **10,391** |
+| Peak prompt | ~22K | ~14K | 16,490 | **20,753** |
+| Archaeology | no | no | **yes** | no |
+| Self-assessment | no | no | no | **yes** |
+| No-nudge completion | yes | yes | no | **yes** |
+
+### Observations
+
+- **No archaeology loop.** The model hit `busybox sh -c` failures (rc=255) and tried different invocations rather than reading akuma source. The difference from report_16 is unclear — may be run-to-run variance, or report_16 had a harder SSH failure that triggered source-reading heuristic.
+- **Compact tools held at 10,391 tokens** for the third consecutive run. Reduction is stable.
+- **Peak 20,753 is higher than report_15 (14K).** The model did more diagnostic work (5 attempts to get busybox verification right). Memory refs kept large outputs off the main context but total tool history still grew.
+- **Taskmaster fired and produced a brief completion** (133 tokens). Effective — no wasted turns.
+- **Small model name bug still present** — `gemma4:yolo-4b` not found, title fell back to large model.
+
+### Playbook update needed
+
+Replace the busybox verification step:
+```
+# Old (fails with rc=255 via sh -c):
+busybox sh -c 'echo busybox OK'
+
+# Working:
+busybox echo busybox OK
+```
+
+---
+
+## 10. Archaeology loop antipattern
+
+**Problem:** When a tool returns unexpected output (SSH rc=255, empty output, unfamiliar error message), qwen3 and other large models switch from "follow the playbook" to "investigate the system." The model starts reading source files, grepping for relevant symbols, and tracing code paths. This consumes context budget, burns time, and never produces the requested output.
+
+**Observed in:** report_12 (qwen3, `02_git_clone`, buffering bug), report_16 (qwen3, `01_verify_apk_bootstrap`, SSH/VM issue).
+
+**Fix options:**
+
+- **Playbook-level**: Add explicit instructions after each fallible step: "If this step fails, record the error and move on. Do not read akuma source files."
+- **System prompt**: Add a global rule: "You are running acceptance tests, not debugging the system under test. If a command fails, document it and continue."
+- **Step budget**: Inject a soft counter into the system prompt: "You have N tool calls remaining. Use them to complete the playbook, not to investigate failures."
+- **Crush-level** (longer term): A max-steps-per-session config that returns a warning tool result when the budget is nearly exhausted, prompting the model to write a partial report.
+
+---
+
 ## Planned fixes (priority order)
 
-Based on all benchmark runs to date, the following improvements are prioritized for gemma4 usability:
+Based on all benchmark runs to date, the following improvements are prioritized:
 
-1. ~~**Dedicated file tools** (`write_file`, `edit_file`)~~ **DONE** — `file_write`, `file_edit`, `file_grep` tools added (`internal/agent/tools/file_write.go`, `file_edit.go`, `file_grep.go`). Structured `path`/`content` fields, no shell escaping. Eliminates the `"unexpected end of JSON input"` failure class.
+1. ~~**Dedicated file tools** (`write_file`, `edit_file`)~~ **DONE** — `file_write`, `file_edit`, `file_grep` added. Eliminates `"unexpected end of JSON input"` failure class.
 
-2. ~~**`memory_grep`**~~ **DONE** — `memory_grep(id, pattern, context_lines)` added (`internal/agent/memory/tool_grep.go`). Returns only matching lines with context, replacing high-limit `memory_scroll` calls. Memory reference summaries now hint to use `memory_grep` first.
+2. ~~**`memory_grep`**~~ **DONE** — `memory_grep(id, pattern, context_lines)` added. Replaces high-limit `memory_scroll` calls.
 
-3. **Parse error retry with config knob** — `max_parse_retries: 3`, backoff, correction hint injected per retry, user-visible error on exhaustion. Fixes the silent hang (report_6 failure mode).
+3. ~~**Compact tool descriptions**~~ **DONE** — `compact_tools: true` in crush.json options. Saves ~1,650 tokens from tool schema at session start (−15%). Per-tool compact wrappers in `internal/agent/tools/compact.go` and `internal/agent/memory/compact.go`; no upstream constructors modified.
 
-4. **Task completion self-assessment** — post-write verification step, configurable via `enable_task_verification`. Catches format mismatches (JSON vs markdown) and hallucinations (corrupted values like `4cap4444`) before the session closes.
+4. ~~**Memory refuse strategy for paginated tools**~~ **DONE** — `memory_refuse_tools: ["view"]` rejects oversized results and tells the model to re-call with `offset`/`limit`. Implemented via `StrategyRefuse` in `internal/agent/memory/wrap.go`.
 
-5. **Context budget per model** — hard eviction at a configurable token limit (e.g. `context_budget: 55000` for gemma4). Drop oldest tool results when approaching the limit. qwen3 handles 70K+ cleanly; gemma4 degrades at ~60K. The budget should be tunable per model in crush.json.
+5. ~~**Todos `in_progress` enforcement**~~ **DONE** — `todos` tool now rejects calls with >1 `in_progress` task with a clear error. Fixes the display bug where multiple `in_progress` states were silently collapsed to the last one.
 
-6. **File read deduplication** (existing issue #2) — evict `read_files` entries after N turns since last access. gemma4 re-reads aggressively, burning context on files it already has.
+6. **Playbook escape clause for archaeology loops** — add to every acceptance playbook: "If a step fails, record the error and move on; do not read akuma source files." Observed in report_12 and report_16; qwen3's primary failure mode.
 
-7. **Bake `busybox sh -c` into acceptance test SSH helper** — now less critical since the akuma buffering bug (`dd0cad5`) is fixed, but still a useful fallback for pipelines and shell features the mini-shell doesn't support natively. The playbook helper should note the option even if it's not the default.
+7. **Parse error retry with config knob** — `max_parse_retries: 3`, backoff, correction hint per retry, user-visible error on exhaustion. Fixes silent hang (report_6 failure mode).
+
+8. **Context budget per model** — hard eviction at a configurable token limit. gemma4 degrades at ~60K; qwen3 handles 130K+. Tunable per model in crush.json.
+
+9. **File read deduplication** (issue #2) — evict `read_files` entries after N turns since last access.
+
+10. ~~**Taskmaster (`enable_task_self_assessment`) wiring**~~ **CONFIRMED WORKING** — fires after clean run completion, injects self-assessment prompt, model responds with 133-token completion. Enable in akuma crush.json with `enable_task_self_assessment: true`.

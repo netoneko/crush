@@ -54,12 +54,23 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 				oldStatusByContent[todo.Content] = todo.Status
 			}
 
+			var inProgressCount int
 			for _, item := range params.Todos {
 				switch item.Status {
 				case "pending", "in_progress", "completed":
 				default:
 					return fantasy.ToolResponse{}, fmt.Errorf("invalid status %q for todo %q", item.Status, item.Content)
 				}
+				if item.Status == "in_progress" {
+					inProgressCount++
+				}
+			}
+			if inProgressCount > 1 {
+				return fantasy.NewTextErrorResponse(fmt.Sprintf(
+					"%d tasks are marked in_progress; only one task may be in_progress at a time. "+
+						"Mark all but one as pending before continuing.",
+					inProgressCount,
+				)), nil
 			}
 
 			todos := make([]session.Todo, len(params.Todos))
@@ -104,7 +115,7 @@ func NewTodosTool(sessions session.Service) fantasy.AgentTool {
 			response := "Todo list updated successfully.\n\n"
 
 			pendingCount := 0
-			inProgressCount := 0
+			inProgressCount = 0
 
 			for _, todo := range todos {
 				switch todo.Status {
