@@ -295,7 +295,57 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	if hasLatest && c.runComplete != nil {
 		c.runComplete.PublishMustDeliver(ctx, pubsub.UpdatedEvent, latest)
 	}
+
+	if originalErr == nil && c.taskSelfAssessmentEnabled() {
+		if assessPrompt, ok := c.buildTaskAssessmentPrompt(ctx, sessionID); ok {
+			_, _ = c.currentAgent.Run(ctx, SessionAgentCall{
+				SessionID:        sessionID,
+				RunID:            runID,
+				Prompt:           assessPrompt,
+				MaxOutputTokens:  maxTokens,
+				ProviderOptions:  mergedOptions,
+				Temperature:      temp,
+				TopP:             topP,
+				TopK:             topK,
+				FrequencyPenalty: freqPenalty,
+				PresencePenalty:  presPenalty,
+				OnComplete:       onComplete,
+			})
+		}
+	}
+
 	return result, originalErr
+}
+
+func (c *coordinator) taskSelfAssessmentEnabled() bool {
+	opts := c.cfg.Config().Options
+	return opts != nil && opts.EnableTaskSelfAssessment != nil && *opts.EnableTaskSelfAssessment
+}
+
+// buildTaskAssessmentPrompt returns a self-assessment prompt when the session
+// has incomplete todos, and false when all todos are already complete or there
+// are no todos at all.
+//
+// The full todo list (including already-completed tasks) is included so the
+// model can submit a correct full replacement via the todos tool without
+// accidentally clobbering completed entries.
+func (c *coordinator) buildTaskAssessmentPrompt(ctx context.Context, sessionID string) (string, bool) {
+	sess, err := c.sessions.Get(ctx, sessionID)
+	if err != nil || len(sess.Todos) == 0 {
+		return "", false
+	}
+	if !session.HasIncompleteTodos(sess.Todos) {
+		return "", false
+	}
+
+	p := "Current task list:\n"
+	for _, t := range sess.Todos {
+		p += fmt.Sprintf("- [%s] %s\n", t.Status, t.Content)
+	}
+	p += "\nSome tasks are still marked as unfinished. Assess each one: if the work was already " +
+		"completed this session, mark it completed. If work is genuinely unfinished, complete it " +
+		"now. Use the todos tool to submit the updated full list."
+	return p, true
 }
 
 func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.ProviderOptions {

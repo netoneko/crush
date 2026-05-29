@@ -287,6 +287,11 @@ type Options struct {
 	MemoryHardLimitBytes int      `json:"memory_hard_limit_bytes,omitempty" jsonschema:"description=Byte length above which tool results are stored in memory (default 8192)"`
 	MemoryOverspill      *float64 `json:"memory_overspill,omitempty" jsonschema:"description=Fraction of the hard limit tolerated inline before storing — e.g. 0.20 means up to hard_limit*1.20 is kept inline (default 0.20)"`
 	MemoryPreviewLines   int      `json:"memory_preview_lines,omitempty" jsonschema:"description=Lines shown in the inline reference summary returned to the model (default 10)"`
+	// EnableTaskSelfAssessment injects a follow-up prompt after every run that
+	// ends with incomplete todos, asking the model to verify and close out any
+	// tasks that were actually finished and to complete any that are genuinely
+	// unfinished. Disabled by default.
+	EnableTaskSelfAssessment *bool `json:"enable_task_self_assessment,omitempty" jsonschema:"description=After a run that ends with incomplete todos\\, inject a follow-up prompt asking the model to verify and close out finished tasks and complete any that are genuinely unfinished.,default=false"`
 }
 
 type MCPs map[string]MCPConfig
