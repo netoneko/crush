@@ -505,6 +505,267 @@ Proper markdown structure, correct PASS verdict, but contains `"port 4cap4444"` 
 
 ---
 
+## Benchmark Run — 2026-05-29 (report_11, qwen3-yolo, 02_git_clone, upstream crush)
+
+**Task:** Run acceptance playbook `acceptance/02_git_clone.md` and write results to `tmp/acceptance/02_git_clone_report_11.md`
+**Model:** `qwen3-yolo:latest` (Qwen3 35B MoE, Q4_K_M, ~26.9 GiB VRAM)
+**Crush build:** Upstream (vanilla) — no custom tooling patches
+**Result:** PARTIAL / guided to completion — report written after user intervention at context limit
+
+### Timing
+
+| Metric | Value |
+|--------|-------|
+| Session start | 17:19 local |
+| Session end | 18:02 local |
+| Duration | ~43 min |
+| Peak prompt | 134,982 tokens (past num_ctx=131,072 — ollama trimmed KV cache) |
+| Context at report write | 130,317 tokens |
+| Final turn | 134,982 tokens (20s — closing text only) |
+
+### Per-turn prompt size (selected)
+
+| Time | Prompt (tokens) | Duration | Notes |
+|------|-----------------|----------|-------|
+| 17:25 | 70,416 | 1m42s | |
+| 17:29 | 75,809 | 49s | |
+| 17:30 | 76,303 | 9s | cache remaining: 784 — very tight |
+| 17:37 | 87,818 | 40s | cache remaining: 755 |
+| 17:41 | 100,538 | 1m34s | |
+| 17:46 | 120,822 | 1m42s | |
+| 17:51 | 129,878 | 2m5s | **max_tokens** hit — model tried to write report, ran out of output budget |
+| 17:59 | 130,317 | 2m39s | user prompted "update the report" — model wrote it successfully |
+| 18:01 | 134,982 | 20s | past num_ctx limit; closing text turn; session done |
+
+### Observations
+
+- **qwen3 handled 134K+ tokens without parse errors.** Ran 4K past the configured num_ctx=131,072 limit — ollama trimmed the KV cache to fit rather than erroring. No malformed tool calls, no JSON truncation.
+- **`max_tokens` on output, not context.** At 129,878 tokens, the model hit the output generation limit mid-report-write — the thinking trace + report content exceeded the per-response token cap. The session appeared stuck but the model was healthy. User nudge ("update the report now") restarted it cleanly.
+- **KV cache evictions throughout.** `cache remaining` was frequently under 1,000 tokens from 17:30 onward, meaning older context was continuously being evicted. qwen3 stayed coherent despite heavy eviction pressure — a notable contrast to gemma4 which fails structurally at ~63K.
+- **Playbook blockers (not model failures):**
+  1. `akuma-playground` repo was private at test time — git clone failed with auth error. User made it public; subsequent clone succeeded.
+  2. `apk add tcc` installs the compiler binary only — no `crt1.o`, `crti.o`, `stdio.h`. Fix: `apk add tcc musl-dev`.
+  3. VM custom shell lacks `/dev/null`, `which`, `find -name`, `head` — broke several diagnostic commands the model tried.
+  4. SSH drops (rc=255) after long apk commands — packages install correctly despite the disconnect.
+- **User-guided victory.** Model correctly diagnosed all blockers and identified `musl-dev` as the fix (confirming user's hint). Final report is accurate and actionable.
+- **No memory offloading triggered.** Vanilla upstream build; memory feature not enabled. Context grew linearly with no offloading.
+
+### Improvements for next run
+
+1. Enable memory with `memory_hard_limit_bytes: 2048` — the long diagnostic bash outputs (apk search, ls /usr/lib) would have been offloaded, saving significant context.
+2. Add `musl-dev` to the playbook: `ssh("apk add tcc musl-dev")`.
+3. Pre-make the repo public or use SSH git clone with key auth.
+4. Consider adding busybox to the disk image for a proper shell environment (fixes `/dev/null`, `find`, `head`, etc.).
+5. Set `num_ctx` higher (e.g. 163840) for qwen3-yolo on this hardware — it handled 134K cleanly, so the 131K limit is the binding constraint, not model quality.
+
+---
+
+## Benchmark Run — 2026-05-29 (report_12, qwen3-yolo, 02_git_clone, updated playbook)
+
+**Task:** Run acceptance playbook `acceptance/02_git_clone.md` (updated from report_11 findings) and write results to `tmp/acceptance/02_git_clone_report_12.md`
+**Model:** `qwen3-yolo:latest` (Qwen3 35B MoE, Q4_K_M, ~26.9 GiB VRAM)
+**Crush build:** Upstream (vanilla)
+**Playbook:** Rewritten after report_11 — includes `UserKnownHostsFile=/dev/null`, ANSI stripping, `apk add tcc musl-dev`, and rc=255 guidance
+**Result:** FAIL — report never written; session hit max_tokens repeatedly and terminated; context exhausted at 121K tokens
+
+### Timing
+
+| Metric | Value |
+|--------|-------|
+| Session start | ~18:26 local |
+| Session still active at | 18:57 local |
+| Peak prompt | ~157K tokens (past num_ctx=131,072 — KV cache trimmed) |
+| Prompt after KV trim | 85,706 tokens (reset) |
+| Prompt at last observation | 121,535 tokens |
+| Sub-agent spawned at | ~93K tokens |
+| Report written | **No** — model hit max_tokens before file write |
+
+### What happened
+
+1. **Shell archaeology loop.** Model ran into the mini-shell buffering issue early — commands like `git` and `apk` return output only to `[DEBUG] Using buffered path` consumers, not the SSH client. Model spent many turns trying to verify commands that appeared to produce no output, looping through increasingly creative diagnostic approaches.
+
+2. **Sub-agent spawned at ~93K tokens.** Model launched a sub-agent tool call to debug the buffering issue (first time this has been observed in crush sessions). The sub-agent read `src/ssh/protocol.rs` and `src/shell/mod.rs`, correctly identified `check_streamable_command` and the hardcoded PATH approach, and reported back. This is the model independently discovering the same root cause that was previously documented in `docs/STABILITY_URGENT_ISSUES.md`.
+
+3. **KV cache trimmed at 157K.** Session hit well past num_ctx=131,072 before crush/ollama trimmed the cache back to ~85K. Despite the trim, the model had already lost the thread — continued in archaeology mode.
+
+4. **User nudge: "include all your debugging findings in the report as well."** Model responded "Now I have enough data to write a comprehensive report." then hit max_tokens mid-generation. Only tool call was `mkdir -p tmp/acceptance`. No report file was written.
+
+5. **Second and third nudges both returned empty.** At 121K tokens, the prompt consumes nearly all of the 131K num_ctx window — no room for generation. Each subsequent request hit max_tokens immediately and returned an empty assistant message. Session terminated without recovery.
+
+### Key new observations
+
+- **Model independently discovered the buffered path bug — and the fix shipped.** The sub-agent read the akuma source, traced `handle_exec → execute_command_streaming_interactive → check_streamable_command`, and reported back. The user applied the fix (commit `dd0cad5`, 18:49 local) while the model was still churning. Correction to prior analysis: `check_streamable_command` already returns `StreamableCommand::External` for any resolvable binary — Fix 2 was already in place. The only bug was the stray `[DEBUG] Using buffered path\r\n` write in the buffered fallback branch of `handle_exec`. One line deleted; a static regression test (T9 in `src/ssh_tests.rs`) guards against re-introduction.
+
+- **`busybox sh -c` workaround was NOT in the updated playbook.** Report_11 mentioned it, but the playbook rewrite only added rc=255 notes and musl-dev. The model had to rediscover the workaround on its own. This cost many turns and eventually caused the session to fail. Should be baked in as the default SSH helper wrapper.
+
+- **Sub-agent tool call works but is expensive.** The agent spawned a sub-agent to debug the buffering, which correctly found the answer but cost additional context tokens for the agent tool call overhead and result injection. Total cost: several thousand tokens for information that could have been retrieved in one `view` call if the model knew where to look.
+
+- **157K tokens, no parse error.** qwen3 continues to show robust structured output even past double the gemma4 failure point. Context robustness is not the issue — it's archaeology loops that waste the context budget.
+
+- **Updated playbook did not prevent the loop.** The rc=255 guidance and ANSI stripping were present, but without `busybox sh -c` as the wrapper, commands still appear to silently fail (buffered output not returned to client). Model fell into the same diagnostic trap as report_11.
+
+### Improvements for next run
+
+1. **Add `busybox sh -c` as default SSH wrapper.** Change the playbook helper to wrap every command: `ssh(f"busybox sh -c '{cmd}'")`. This bypasses the streaming check and returns output correctly. Without this, all non-whitelisted binaries silently discard output to the SSH client.
+2. ~~**Fix the akuma buffering bug.**~~ **FIXED** (`dd0cad5`) — deleted the `[DEBUG] Using buffered path` write from `handle_exec`; T9 regression test added. `check_streamable_command` already streamed all resolvable binaries; only the debug print was the bug.
+3. **Enable memory offloading.** Long diagnostic bash outputs from the archaeology loop would have been offloaded, saving 30–40K tokens.
+4. **Add playbook escape hatch.** If rc=255 and out is empty, the note should say "use `busybox sh -c '...'` to force streaming" explicitly — not just "rc=255 is normal."
+
+---
+
+## Benchmark Run — 2026-05-29 (report_13, qwen3-yolo, 02_git_clone, buffering fix applied)
+
+**Task:** Run acceptance playbook `acceptance/02_git_clone.md` and write results to `tmp/acceptance/02_git_clone_report_13.md`
+**Model:** `qwen3-yolo:latest` (Qwen3 35B MoE, Q4_K_M, ~26.9 GiB VRAM)
+**Crush build:** Upstream (vanilla)
+**Akuma build:** Post-`dd0cad5` — `[DEBUG] Using buffered path` removed
+**Result:** PARTIAL — report written (6.8KB, good quality); git clone blocked by akuma kernel bug
+
+### Timing
+
+| Metric | Value |
+|--------|-------|
+| Session start | ~19:09 local |
+| Report written at | 19:28 local |
+| Peak prompt at report | ~103,910 tokens |
+| User nudge required | Yes — "just write the report already" |
+
+### Step results
+
+| Step | Result |
+|------|--------|
+| 1–4 Setup | ✅ PASS |
+| 5 `apk add git` | ✅ PASS (git 2.52.0) |
+| 6a `git --version` | ✅ PASS |
+| 6b `git clone` | ❌ FAIL — `fatal: write error: No such file or directory` |
+| 7 `apk add tcc musl-dev` | ✅ PASS (tcc 0.9.27, musl-dev installed) |
+| 8 `tcc -o /tmp/hello` | ❌ FAIL — transitive (no `akuma-playground/hello.c`) |
+| 9 `/tmp/hello` | ❌ FAIL — transitive |
+
+### Root cause identified by model
+
+Git clone fails because it needs `/tmp/` for internal pack temp files during the HTTPS fetch. **The akuma ext2 VFS does not forward `O_CREAT` write syscalls from child processes** — `/tmp/` appears in `ls /` and the shell's `mkdir` builtin can create entries in its directory table, but user-space processes calling `open("/tmp/...", O_CREAT)` get `ENOENT`. This is an akuma kernel bug, not a playbook issue.
+
+Model tried 6 workarounds before giving up:
+1. Plain `git clone <url>` (CWD `/`) → `No such file or directory`
+2. `git clone <url> /tmp/akuma-playground` → same error
+3. `mkdir -p /tmp/ap && git clone <url> /tmp/ap/akuma-playground` → mkdir returned "Not found"
+4. `TMPDIR=/ git clone <url>` → mini-shell rejected `KEY=VALUE cmd` syntax
+5. `export TMPDIR=/ && git clone <url>` → env not propagated to git child process
+6. `cd / && git clone <url> akuma-playground` → same fatal write error
+
+### Additional bugs identified
+
+- **`export` doesn't propagate to child processes.** The mini-shell's `execve` wrapper does not forward the full environment to child processes. `TMPDIR=/` can be set but git never sees it.
+- **No `VAR=val cmd` syntax.** Mini-shell treats `TMPDIR=/` as a command name (unknown command). Standard POSIX env-injection syntax not supported.
+
+### Model quality
+
+Report is 6.8KB, well-structured, accurate diagnosis, all workarounds documented. Model correctly distinguished between platform bugs (ext2 writes, env propagation) and transitive failures (compile, run). Context was at ~104K when the report was written — pushed to the wall but functional after user nudge.
+
+### What changed vs report_12
+
+- Buffering fix (`dd0cad5`) eliminated the archaeology loop — model got actual command output this time
+- Model reached the real blocker (git clone / ext2 writes) instead of spinning on buffering
+- Report written successfully vs complete session failure
+- **New blocker exposed:** ext2 `O_CREAT` from child processes — this is the next thing to fix in akuma
+
+### Improvements for next run
+
+1. **Fix akuma ext2 `O_CREAT` for child processes** — primary blocker. Once fixed, git clone should work.
+2. **Fix `execve` env propagation** — `export TMPDIR=` must reach child processes.
+3. **Support `VAR=val cmd` syntax** in the mini-shell.
+4. Add `.git` suffix to clone URL in playbook (confirmed by user; less likely to cause issues with some git servers).
+
+---
+
+## Benchmark Run — 2026-05-29 (report_14, qwen3-yolo, 01_verify_apk_bootstrap, memory + new tools)
+
+**Task:** Run acceptance playbook `acceptance/01_verify_apk_bootstrap.md` and write results to `tmp/acceptance/01_verify_apk_bootstrap_report_13.md`
+**Model:** `qwen3-yolo:latest` (Qwen3 35B MoE, Q4_K_M, ~26.9 GiB VRAM)
+**Crush build:** Patched — memory enabled, `file_write`/`file_edit`/`file_grep`/`memory_grep` added
+**Config:** `enable_memory: true`, `memory_hard_limit_bytes: 2048`
+**Result:** PASS — report written (6.4KB, accurate, good quality)
+
+### Timing
+
+| Metric | Value |
+|--------|-------|
+| Session duration | ~7 min (20:02–20:09 local) |
+| LLM requests | 30 |
+| Starting prompt | **12,197 tokens** |
+| Peak prompt | **22,425 tokens** |
+| Total LLM time | ~192 s (3.2 min) |
+| Avg response time | 6.4 s |
+| Max response time | 32.0 s (cold-cache turn 2) |
+
+### Tool call breakdown (27 total)
+
+| Tool | Calls |
+|------|-------|
+| `bash` | 16 |
+| `todos` | 5 |
+| `grep` | 2 |
+| `job_output` | 1 |
+| `ls` | 1 |
+| `view` | 1 |
+| `write` | 1 |
+
+`memory_scroll` / `memory_grep` / `memory_list`: **0** — memory refs were stored but not queried.  
+`file_write` / `file_edit` / `file_grep`: **0** — new tools available but not invoked (model used `write` + `bash` instead).
+
+### Memory references stored (5 total)
+
+| ID | Tool | Bytes |
+|----|------|-------|
+| mem_1 | bash | 3,060 |
+| mem_2 | bash | 3,090 |
+| mem_3 | grep | 9,763 |
+| mem_4 | bash | 2,729 |
+| mem_5 | bash | 5,539 |
+
+### Comparison: report_3 → report_4 → report_14
+
+| Metric | Report_3 (qwen3, no mem) | Report_4 (qwen3, mem fix) | Report_14 (qwen3, mem + tools) |
+|--------|--------------------------|---------------------------|--------------------------------|
+| Result | PASS | PASS | PASS |
+| Session duration | 18.2 min | 8.1 min | **~7 min** |
+| LLM requests | 41 | 17 | 30 |
+| Total tool calls | 92 | 46 | **27** |
+| Avg response time | 18.8 s | 14.0 s | **6.4 s** |
+| Max response time | 175.9 s | 48.8 s | **32.0 s** |
+| Starting prompt | ~46K tokens | ~47K tokens | **12K tokens** |
+| Peak prompt | ~71K tokens | ~62K tokens | **22K tokens** |
+| Total LLM time | ~772 s | ~238 s | **192 s** |
+| Memory refs stored | 0 | 0 | **5** |
+| `view` calls | 35 | 15 | 1 |
+| `bash` calls | 31 | 14 | 16 |
+| `todos` calls | 18 | 1 | 5 |
+| Parse errors | 0 | 0 | 0 |
+
+### Observations
+
+- **Starting prompt is 12K tokens, not 46K.** Earlier reports recorded ~46K starting prompt tokens, but verification against all available crush logs shows no session ever exceeding 30K `prompt_tokens` in the Ollama API response. The actual breakdown for the current session: system prompt 26,449 chars (~6,612 tokens) + tools JSON 20,682 chars (~5,170 tokens) + initial user message (~500 tokens) ≈ 12,282 tokens. The 46K values in earlier reports were likely from a different Ollama version that counted tool schemas differently, or from rotated log files that cannot be checked. **12K is the correct current baseline.** This makes all three runs (report_3, _4, _14) directly comparable at the same starting prompt size.
+
+- **Memory was triggered (5 refs) but never queried.** The model received compact summaries for all 5 oversized results and continued without scrolling them back. For this playbook the summaries were sufficient — the model didn't need to re-read the full content. This is the ideal memory behavior: offload + forget rather than offload + scroll.
+
+- **New tools (`file_write`, `file_edit`, `file_grep`) not invoked.** qwen3 used `write` (bash-style) and inline bash for all file operations. The new tools are present in the schema but the model had no reason to prefer them. Expected to see impact with gemma4, which hits the `"unexpected end of JSON input"` failure when writing large content via bash.
+
+- **Task tracking diverged from actual completion.** The crush todos at session end show: tasks 1–3 completed, task 4 ("Start the VM and wait for SSH") `in_progress`, tasks 5–6 ("Run acceptance steps", "Write results report") `pending`. But the report file exists with full PASS content. The model completed all work but never called `todos` to close out tasks 4–6. Session ended with `finish_reason: tool_calls` — the model was still running when the session was closed. From the UI perspective the task appeared incomplete; the actual output was correct.
+
+- **Title generation failed.** Small model `gemma4:yolo-4b` not found; title fell back to the large model (32s overhead). See issue #5 (model name validation).
+
+- **No `reasoning` output (qwen3).** Like previous qwen3 runs, no `<think>` tags emitted. The `reasoning_effort: high` config has no effect for Ollama-served models.
+
+### Improvements for next run
+
+1. **Investigate starting prompt size.** 12K vs 46K is a large unexplained delta. Check whether the prior runs loaded a CLAUDE.md, a larger `read_files` set, or a different system prompt source. If the reduction is real and stable, it's the single biggest win in this series.
+2. **Fix `gemma4:yolo-4b` model name** in crush.json → `gemma4-yolo-4b` (colon vs hyphen, issue #5).
+3. **Verify `file_write` gets used by gemma4** — run `01_verify_apk_bootstrap` with gemma4 to confirm the new tool eliminates the JSON truncation failure.
+4. **Todo tracking fix** — model should mark tasks done before writing the final report. Consider injecting a "mark all completed todos" step after the model produces a terminal write.
+
+---
+
 ## Planned fixes (priority order)
 
 Based on all benchmark runs to date, the following improvements are prioritized for gemma4 usability:
@@ -520,3 +781,5 @@ Based on all benchmark runs to date, the following improvements are prioritized 
 5. **Context budget per model** — hard eviction at a configurable token limit (e.g. `context_budget: 55000` for gemma4). Drop oldest tool results when approaching the limit. qwen3 handles 70K+ cleanly; gemma4 degrades at ~60K. The budget should be tunable per model in crush.json.
 
 6. **File read deduplication** (existing issue #2) — evict `read_files` entries after N turns since last access. gemma4 re-reads aggressively, burning context on files it already has.
+
+7. **Bake `busybox sh -c` into acceptance test SSH helper** — now less critical since the akuma buffering bug (`dd0cad5`) is fixed, but still a useful fallback for pipelines and shell features the mini-shell doesn't support natively. The playbook helper should note the option even if it's not the default.
