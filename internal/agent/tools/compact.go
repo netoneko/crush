@@ -134,4 +134,3 @@ func ApplyCompact(toolList []fantasy.AgentTool) []fantasy.AgentTool {
 	}
 	return result
 }
-

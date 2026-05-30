@@ -16,15 +16,18 @@ const (
 	// bootstrap step has completed and the system prompt has been replaced
 	// with a compressed version for subsequent turns.
 	TypeSystemPromptCompressed Type = "system_prompt_compressed"
+	// TypeSystemPromptCompressing indicates the async summarize_prompt bootstrap step
+	// has started. The UI should show a status indicator until TypeSystemPromptCompressed fires.
+	TypeSystemPromptCompressing Type = "system_prompt_compressing"
 )
 
 // Notification represents a domain event published by the agent.
 type Notification struct {
-	SessionID      string
-	SessionTitle   string
-	Type           Type
-	ProviderID     string
-	ReductionPct   int // set for TypeSystemPromptCompressed
+	SessionID    string
+	SessionTitle string
+	Type         Type
+	ProviderID   string
+	ReductionPct int // set for TypeSystemPromptCompressed
 }
 
 // RunComplete is the authoritative end-of-run signal for a session.

@@ -18,7 +18,7 @@ type mockTool struct {
 func (m *mockTool) Info() fantasy.ToolInfo {
 	return fantasy.ToolInfo{Name: m.name, Description: "mock"}
 }
-func (m *mockTool) ProviderOptions() fantasy.ProviderOptions    { return m.opts }
+func (m *mockTool) ProviderOptions() fantasy.ProviderOptions     { return m.opts }
 func (m *mockTool) SetProviderOptions(o fantasy.ProviderOptions) { m.opts = o }
 func (m *mockTool) Run(_ context.Context, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	return fantasy.NewTextResponse(m.content), nil
@@ -140,8 +140,8 @@ type errorTool struct {
 	opts    fantasy.ProviderOptions
 }
 
-func (e *errorTool) Info() fantasy.ToolInfo                     { return fantasy.ToolInfo{Name: "bash"} }
-func (e *errorTool) ProviderOptions() fantasy.ProviderOptions   { return e.opts }
+func (e *errorTool) Info() fantasy.ToolInfo                       { return fantasy.ToolInfo{Name: "bash"} }
+func (e *errorTool) ProviderOptions() fantasy.ProviderOptions     { return e.opts }
 func (e *errorTool) SetProviderOptions(o fantasy.ProviderOptions) { e.opts = o }
 func (e *errorTool) Run(_ context.Context, _ fantasy.ToolCall) (fantasy.ToolResponse, error) {
 	return fantasy.NewTextErrorResponse(e.content), nil

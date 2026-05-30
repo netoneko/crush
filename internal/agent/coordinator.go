@@ -570,7 +570,9 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		RunComplete:          c.runComplete,
 	})
 
-	summarizePrompt := c.cfg.Config().Options != nil && c.cfg.Config().Options.SummarizePrompt
+	summarizePrompt := c.cfg.Config().Options != nil &&
+		c.cfg.Config().Options.SummarizePrompt &&
+		!isSubAgent
 	c.readyWg.Go(func() error {
 		systemPrompt, err := prompt.Build(ctx, large.Model.Provider(), large.Model.Model(), c.cfg)
 		if err != nil {
@@ -578,7 +580,15 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		}
 		result.SetSystemPrompt(systemPrompt)
 		if summarizePrompt {
-			go c.summarizeSystemPrompt(ctx, systemPrompt, small, result)
+			// Publish "compressing" notification so the UI can show a status indicator
+			if c.notify != nil {
+				c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+					Type: notify.TypeSystemPromptCompressing,
+				})
+			}
+			// Run synchronously inside readyWg so Run() blocks until compression is done.
+			// This ensures the first user turn uses the compressed prompt.
+			c.summarizeSystemPrompt(ctx, systemPrompt, small, result)
 		}
 		return nil
 	})
@@ -1395,8 +1405,8 @@ func logTurnSkillUsage(
 }
 
 // summarizeSystemPrompt calls the small model to compress systemPrompt and
-// updates the agent with the result. Runs in its own goroutine; the first
-// model turn uses the original prompt. Logs completion or failure.
+// updates the agent with the result. Runs synchronously during agent build;
+// the first model turn uses the compressed prompt. Logs completion or failure.
 func (c *coordinator) summarizeSystemPrompt(ctx context.Context, systemPrompt string, small Model, agent SessionAgent) {
 	const summarizeInstruction = "You are a prompt compressor. Rewrite the system prompt below into the most concise version possible that preserves all behavioral rules, tool names, constraints, and dynamic template blocks ({{...}}). Remove all examples, redundant prose, and repeated explanations. Output only the rewritten prompt — no commentary.\n\n"
 

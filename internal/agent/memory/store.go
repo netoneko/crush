@@ -25,8 +25,8 @@ const (
 type Entry struct {
 	ID        string
 	Kind      Kind
-	Source    string    // tool name that produced this entry
-	Lines     []string  // full content split by newline
+	Source    string   // tool name that produced this entry
+	Lines     []string // full content split by newline
 	CreatedAt time.Time
 }
 

@@ -80,7 +80,7 @@ type memoryTool struct {
 	cfg   WrapConfig
 }
 
-func (m *memoryTool) Info() fantasy.ToolInfo             { return m.inner.Info() }
+func (m *memoryTool) Info() fantasy.ToolInfo                   { return m.inner.Info() }
 func (m *memoryTool) ProviderOptions() fantasy.ProviderOptions { return m.inner.ProviderOptions() }
 func (m *memoryTool) SetProviderOptions(opts fantasy.ProviderOptions) {
 	m.inner.SetProviderOptions(opts)
