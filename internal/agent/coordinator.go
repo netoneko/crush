@@ -187,7 +187,11 @@ func NewCoordinator(
 	}
 
 	// TODO: make this dynamic when we support multiple agents
-	prompt, err := coderPrompt(prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	promptFn := coderPrompt
+	if c.cfg.Config().Options != nil && c.cfg.Config().Options.CompactPrompt {
+		promptFn = coderCompactPrompt
+	}
+	prompt, err := promptFn(prompt.WithWorkingDir(c.cfg.WorkingDir()))
 	if err != nil {
 		return nil, err
 	}
@@ -566,12 +570,16 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		RunComplete:          c.runComplete,
 	})
 
+	summarizePrompt := c.cfg.Config().Options != nil && c.cfg.Config().Options.SummarizePrompt
 	c.readyWg.Go(func() error {
 		systemPrompt, err := prompt.Build(ctx, large.Model.Provider(), large.Model.Model(), c.cfg)
 		if err != nil {
 			return err
 		}
 		result.SetSystemPrompt(systemPrompt)
+		if summarizePrompt {
+			go c.summarizeSystemPrompt(context.Background(), systemPrompt, small, result)
+		}
 		return nil
 	})
 
@@ -1384,6 +1392,52 @@ func logTurnSkillUsage(
 		"loaded_total", len(after),
 		"loaded_this_turn", loadedThisTurn,
 	)
+}
+
+// summarizeSystemPrompt calls the small model to compress systemPrompt and
+// updates the agent with the result. Runs in its own goroutine; the first
+// model turn uses the original prompt. Logs completion or failure.
+func (c *coordinator) summarizeSystemPrompt(ctx context.Context, systemPrompt string, small Model, agent SessionAgent) {
+	const summarizeInstruction = "You are a prompt compressor. Rewrite the system prompt below into the most concise version possible that preserves all behavioral rules, tool names, constraints, and dynamic template blocks ({{...}}). Remove all examples, redundant prose, and repeated explanations. Output only the rewritten prompt — no commentary.\n\n"
+
+	smallAgent := fantasy.NewAgent(
+		small.Model,
+		fantasy.WithMaxOutputTokens(int64(cmp.Or(small.ModelCfg.MaxTokens, 2048))),
+		fantasy.WithUserAgent(userAgent),
+	)
+
+	streamCall := fantasy.AgentStreamCall{
+		Prompt: summarizeInstruction + systemPrompt,
+	}
+
+	resp, err := smallAgent.Stream(ctx, streamCall)
+	if err != nil {
+		slog.Warn("summarize_prompt: small model call failed", "error", err)
+		return
+	}
+	if resp == nil {
+		slog.Warn("summarize_prompt: nil response from small model")
+		return
+	}
+
+	compressed := strings.TrimSpace(resp.Response.Content.Text())
+	if compressed == "" {
+		slog.Warn("summarize_prompt: empty response from small model")
+		return
+	}
+
+	agent.SetSystemPrompt(compressed)
+	slog.Info("summarize_prompt: system prompt compressed",
+		"original_bytes", len(systemPrompt),
+		"compressed_bytes", len(compressed),
+		"reduction_pct", int(100*(1-float64(len(compressed))/float64(len(systemPrompt)))),
+	)
+
+	if c.notify != nil {
+		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
+			Type: notify.TypeSystemPromptCompressed,
+		})
+	}
 }
 
 // logDiscoveryStats emits a single structured log line summarising skill

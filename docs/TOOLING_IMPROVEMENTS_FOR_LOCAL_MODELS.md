@@ -1032,6 +1032,55 @@ busybox echo busybox OK
 
 ---
 
+---
+
+## Context budget: README and system prompt analysis (2026-05-30)
+
+### Token measurement methodology
+
+Ollama's tokenizer reports ~2.62 chars/token for the mixed markdown/code/prose content of the
+akuma context. All token estimates below use this ratio (measured from an actual `prompt_eval_count`
+response: 8,871 tokens for 23,219 chars of system prompt + README + user message).
+
+### README token impact
+
+If `README.md` is added to `context_paths` it is injected into the system prompt on every session.
+
+| Version | Chars | Tokens (Ollama ratio) |
+|---------|-------|-----------------------|
+| Original (pre-2026-05-30) | 12,831 | ~4,902 |
+| Hand-edited (removed ASCII box, memory layout, prose) | 7,422 | ~2,836 |
+| gemma4-yolo-4b auto-compressed (truncated at 2048 output tokens) | 4,906 | ~1,874 |
+| **Savings: original → hand-edit** | −5,409 chars | **−2,067 tokens** |
+
+The model's auto-compressed output was cut off mid-sentence at the 2,048 output token limit. The
+reachable floor for a complete, agent-functional README is somewhere between the hand-edit (~2,836)
+and the model output if it completed (~1,800 estimated). The hand-edited version is the current
+baseline; further compression is possible but requires raising `num_predict` or chunking the
+generation.
+
+### Starting prompt with README added
+
+| Configuration | Starting prompt tokens |
+|---------------|------------------------|
+| No README (current baseline, report_14–17) | ~12,200 |
+| + Original README | ~17,100 |
+| + Hand-edited README | ~15,000 |
+| + compact_tools + hand-edited README | ~13,400 |
+
+Adding the hand-edited README and `compact_tools` together keeps the starting prompt within ~1,200
+tokens of the no-README baseline while giving the model full capability and platform context.
+
+### Note: `read_files` table is not a context source
+
+The `read_files` SQLite table (issue #2 in this doc) does **not** re-inject file content into
+prompts. It is used only for the edit safety guard (must-read-before-edit) and LSP warmup on
+session resume. The context bloat from `view` calls is purely from tool result history replayed
+in the message thread, not from any separate injection mechanism. Issue #2 as originally described
+is a non-issue; the memory offloading feature already addresses the actual source of bloat.
+
+---
+
 ## Planned fixes (priority order)
 
 Based on all benchmark runs to date, the following improvements are prioritized:
@@ -1052,6 +1101,6 @@ Based on all benchmark runs to date, the following improvements are prioritized:
 
 8. **Context budget per model** — hard eviction at a configurable token limit. gemma4 degrades at ~60K; qwen3 handles 130K+. Tunable per model in crush.json.
 
-9. **File read deduplication** (issue #2) — evict `read_files` entries after N turns since last access.
+9. ~~**File read deduplication** (issue #2)~~ **NOT NEEDED** — `read_files` table is not a prompt source; see analysis above.
 
 10. ~~**Taskmaster (`enable_task_self_assessment`) wiring**~~ **CONFIRMED WORKING** — fires after clean run completion, injects self-assessment prompt, model responds with 133-token completion. Enable in akuma crush.json with `enable_task_self_assessment: true`.

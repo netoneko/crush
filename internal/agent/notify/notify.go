@@ -12,6 +12,10 @@ const (
 	// TypeReAuthenticate indicates the agent encountered an
 	// authentication error and the user needs to re-authenticate.
 	TypeReAuthenticate Type = "re_authenticate"
+	// TypeSystemPromptCompressed indicates the async summarize_prompt
+	// bootstrap step has completed and the system prompt has been replaced
+	// with a compressed version for subsequent turns.
+	TypeSystemPromptCompressed Type = "system_prompt_compressed"
 )
 
 // Notification represents a domain event published by the agent.

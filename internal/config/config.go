@@ -301,6 +301,17 @@ type Options struct {
 	// windows. Affects memory_scroll, memory_list, memory_grep, file_write,
 	// file_edit, and file_grep.
 	CompactTools bool `json:"compact_tools,omitempty" jsonschema:"description=Use shorter tool descriptions to reduce prompt token usage. Useful for local/small-context models.,default=false"`
+	// CompactPrompt replaces the full coder system prompt with a shorter variant
+	// that preserves all behavioral rules but strips verbose examples, duplicate
+	// explanations, and redundant sections. Saves ~4,500–5,000 tokens.
+	// Recommended for local models with context windows under 64K.
+	CompactPrompt bool `json:"compact_prompt,omitempty" jsonschema:"description=Use a shorter system prompt to reduce token usage. Recommended for local/small-context models.,default=false"`
+	// SummarizePrompt runs an async bootstrap step at session start that uses
+	// the small model to further compress the system prompt. The first turn uses
+	// the base prompt (full or compact); subsequent turns use the summarized
+	// version. A log line is emitted when the summarization completes. Requires
+	// the small model to be configured.
+	SummarizePrompt bool `json:"summarize_prompt,omitempty" jsonschema:"description=Async: use the small model to compress the system prompt at session start. First turn uses the base prompt; later turns use the summarized version.,default=false"`
 }
 
 type MCPs map[string]MCPConfig
