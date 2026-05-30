@@ -1034,6 +1034,94 @@ busybox echo busybox OK
 
 ---
 
+## Benchmark Run — 2026-05-30 (report_18, qwen3-yolo, 01_verify_apk_bootstrap, compact_prompt enabled)
+
+**Task:** Run acceptance playbook `acceptance/01_verify_apk_bootstrap.md` and write results to `tmp/acceptance/01_verify_apk_bootstrap_report_17.md`
+**Model:** `qwen3-yolo:latest` (Qwen3 35B MoE, Q4_K_M, ~26.9 GiB VRAM)
+**Crush build:** Patched — memory + new tools + `compact_tools: true` + `compact_prompt: true`
+**Config:** `enable_memory: true`, `memory_hard_limit_bytes: 2048`, `compact_tools: true`, `compact_prompt: true`
+**Result:** PASS — all 6 steps green, all expected output lines matched exactly
+
+### Timing
+
+| Metric | Value |
+|--------|-------|
+| Session ID | `cbb2cc38` |
+| Session start | 16:54:10 local |
+| Turn 1 input | **10,371 tokens** |
+| Observed peak (turn 15) | ~17,961 tokens |
+| Growth rate | ~400–500 tokens/turn |
+
+### Per-turn input token growth
+
+| Turn | Input tokens | Notes |
+|------|-------------|-------|
+| 1 | 10,371 | First real turn |
+| 2 | 11,629 | +1,258 — first tool results |
+| 3–5 | 11,718–11,950 | Gradual growth |
+| 6 | 12,232 | |
+| 7 | 12,774 | |
+| 8 | 13,068 | |
+| 9 | 14,238 | +1,170 spike |
+| 10 | 14,578 | |
+| 11 | 15,513 | |
+| 12 | 16,663 | +1,150 spike |
+| 13 | 16,759 | |
+| 14 | 17,856 | |
+| 15 | 17,961 | |
+
+### Result summary
+
+| Expected output | Match? |
+|-----------------|--------|
+| `(1/2) Installing musl (1.2.5-r23)` | ✅ |
+| `(2/2) Installing busybox (1.37.0-r30)` | ✅ |
+| `Executing busybox-1.37.0-r30.post-install` | ✅ |
+| `Executing busybox-1.37.0-r30.trigger` | ✅ |
+| `OK: 1612 KiB in 2 packages` | ✅ |
+| `busybox OK` | ✅ |
+
+### Compact_prompt: unexpected measurement
+
+Expected: `compact_prompt` reduces system prompt from ~7,506 tokens (original template) to ~3,602 tokens (compact template) — a ~3,904 token savings. Turn 1 should have been ~6,500 tokens.
+
+**Observed:** Turn 1 = 10,371 tokens vs report_17's 10,391 (no compact_prompt) — only **20 tokens difference**, well within noise.
+
+The compact template IS being sent to the model (confirmed from crush HTTP log body: prompt opens with `You are Crush, a powerful AI Assistant...` matching `coder_compact.md.tpl`). The Ollama `completion request` log at 16:53:36 shows `prompt=42,642 chars` for the first turn; at the measured 4.1 chars/token ratio for JSON-encoded chat completions this is ~10,400 tokens — consistent with the posthog figure but inconsistent with the expected 3,900-token savings.
+
+**Likely causes (to investigate):**
+1. The akuma `context_paths` injects large files (README, skill docs, etc.) into the `<memory>` block, which dominates the rendered system prompt regardless of template size. Template prose savings (~10K chars) may be overshadowed by injected content.
+2. The chars/token ratio for the rendered prompt including injected content may differ from the 2.62 ratio measured on plain prose.
+3. Compare rendered system prompt length in the HTTP body for a compact vs non-compact session to isolate what changed.
+
+### Session health vs baseline (report_17)
+
+| Metric | Report_17 (no compact_prompt) | Report_18 (compact_prompt) |
+|--------|-------------------------------|----------------------------|
+| Result | PASS | **PASS** |
+| Turn 1 input tokens | 10,391 | 10,371 |
+| Peak tokens seen | 20,753 | ~17,961 |
+| Turns before context pressure | none seen | none seen |
+| Parse errors | 0 | 0 |
+| Archaeology loop | no | no |
+
+**Key win:** session ran 15+ turns and peaked at ~18K tokens vs report_17's 20,753 peak — a **~2,800 token lower peak** despite similar starting point. The playbook completed cleanly without the diagnostic work that inflated report_17.
+
+### Observations
+
+- **No archaeology loop** — model executed the 6-step playbook directly without reading akuma source. SSH known_hosts warning observed (expected for fresh VM boots) but did not block execution.
+- **Compact_prompt token savings not visible at turn 1** — template reduction is real but appears offset by injected context (context_paths content). Need to measure rendered system prompt character count in the HTTP request body to quantify actual savings.
+- **Lower peak than report_17** — despite identical starting tokens, the session peaked lower. The compact template may be reducing verbosity of tool calls / model responses rather than raw system prompt size.
+- **Session health is good for a 27K context window** — at ~400 tokens/turn growth, context pressure would not appear until turn ~40+.
+
+### Next investigation
+
+1. **Measure rendered system prompt size directly** — log `len(systemPrompt)` in `buildAgent` before and after `compact_prompt` to confirm actual rendered size reduction.
+2. **Check what context_paths are active** in akuma's `crush.json` — README and skill content in `<memory>` may dominate the rendered prompt.
+3. **Run with context_paths empty** to isolate template-only savings vs injected content.
+
+---
+
 ## Context budget: README and system prompt analysis (2026-05-30)
 
 ### Token measurement methodology
@@ -1094,6 +1182,8 @@ Based on all benchmark runs to date, the following improvements are prioritized:
 4. ~~**Memory refuse strategy for paginated tools**~~ **DONE** — `memory_refuse_tools: ["view"]` rejects oversized results and tells the model to re-call with `offset`/`limit`. Implemented via `StrategyRefuse` in `internal/agent/memory/wrap.go`.
 
 5. ~~**Todos `in_progress` enforcement**~~ **DONE** — `todos` tool now rejects calls with >1 `in_progress` task with a clear error. Fixes the display bug where multiple `in_progress` states were silently collapsed to the last one.
+
+6b. ~~**Compact system prompt**~~ **DONE** (`compact_prompt: true`) — `coder_compact.md.tpl` template at 9,438 chars vs original 19,666 chars (52% reduction in template size). Template savings confirmed sent to model; rendered prompt reduction vs. injected context_paths content pending measurement (report_18 shows ~20 token net difference at turn 1, less than expected — investigate rendered size).
 
 6. **Playbook escape clause for archaeology loops** — add to every acceptance playbook: "If a step fails, record the error and move on; do not read akuma source files." Observed in report_12 and report_16; qwen3's primary failure mode.
 
