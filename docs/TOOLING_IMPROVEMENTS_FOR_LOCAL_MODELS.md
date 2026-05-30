@@ -60,7 +60,7 @@ Use memory_scroll(id="mem_42", offset=0, limit=50) to read more.
 Exposed tools:
 
 - `memory_list` — list all stored references (ID, source, kind, line count, first-line preview)
-- `memory_scroll` — read a window of lines from a reference (`id`, `offset`, `limit ≤ 200`)
+- `memory_scroll` — read a window of lines from a reference (`id`, `offset`, `limit ≤ 50`)
 - `memory_grep` — search within a stored reference by regex (`id`, `pattern`, `context_lines`); prefer over repeated `memory_scroll` calls to keep responses small
 
 Configuration (`options` block in `crush.json`):
@@ -1166,6 +1166,89 @@ prompts. It is used only for the edit safety guard (must-read-before-edit) and L
 session resume. The context bloat from `view` calls is purely from tool result history replayed
 in the message thread, not from any separate injection mechanism. Issue #2 as originally described
 is a non-issue; the memory offloading feature already addresses the actual source of bloat.
+
+---
+
+## Benchmark Run — 2026-05-30 (report_19/22, qwen3-yolo, 02_git_clone, full stack)
+
+**Task:** Run acceptance playbook `acceptance/02_git_clone.md` and write results to `tmp/acceptance/02_git_clone_report_22.md`
+**Model:** `qwen3-yolo:latest` (Qwen3 35B MoE, Q4_K_M, ~26.9 GiB VRAM)
+**Small model:** `qwen3:4b` (summarize_prompt; `enable_thinking: false` added this session)
+**Crush build:** Patched — memory + compact_tools + compact_prompt + summarize_prompt
+**Config:** `enable_memory: true`, `memory_hard_limit_bytes: 2048`, `compact_tools: true`, `compact_prompt: true`, `summarize_prompt: true`
+**Result:** PARTIAL PASS — steps 5–7 pass, steps 8–9 fail (playbook bugs, not model bugs)
+
+### Session token progression
+
+| Turn (time) | Input tokens | Output tokens | Notes |
+|-------------|-------------|---------------|-------|
+| 18:13:43 | 12,198 | — | Turn 1 (with full system prompt, pre-compress) |
+| 18:14:22 | 12,302 | — | |
+| 18:14:38 | 12,469 | 133 | |
+| 18:15:39 | 12,976 | 201 | |
+| 18:17:00 | 13,332 | 732 | |
+| 18:17:18 | 14,071 | 81 | |
+| 18:19:34 | 14,310 | 67 | User cancelled agentic_fetch hallucination |
+| 18:21:56 | 10,665 | 1,161 | "continue" resumes; new turn with compressed prompt |
+| 18:30:25 | 20,740 | 1,133 | |
+| 18:33:01 | 24,511 | 204 | |
+| 18:34:06 | **24,913** | **1,061** | Final turn — partial summary written as chat text |
+
+**Peak: 24,913 tokens. Duration: ~21 min. No parse errors.**
+
+### Step results
+
+| Step | Result | Notes |
+|------|--------|-------|
+| 5 Install git | ✅ PASS | `OK: 30.8 MiB in 20 packages` (rc=255 expected) |
+| 6 git clone | ✅ PASS | Cloned successfully; `hello.c` confirmed in working tree |
+| 7 Install tcc + musl-dev | ✅ PASS | `OK: 30.8 MiB in 20 packages` (rc=255 expected) |
+| 8 Compile hello.c | ❌ FAIL | `tcc: error: file 'libtcc1.a' not found` |
+| 9 Run binary | ❌ FAIL | `Unknown command: /tmp/hello` (mini-shell can't exec ELF binaries by path) |
+
+### New blockers discovered
+
+**`libtcc1.a` not found:** Alpine's `tcc` apk installs `libtcc1.a` to `/usr/lib/tcc/`. Plain `tcc hello.c` doesn't find it; need `-B /usr/lib/tcc`. Playbook updated to use `tcc -B /usr/lib/tcc -o /usr/bin/hello hello.c`.
+
+**Mini-shell cannot execute ELF binaries by path:** `/tmp/hello` → `Unknown command: /tmp/hello`. The mini-shell only resolves commands via PATH lookup — arbitrary paths like `/tmp/foo` are rejected. Fix: compile to a PATH directory (`/usr/bin/hello`) and invoke as `hello`. Playbook updated accordingly.
+
+**Stale clone artifact:** Second run got `fatal: destination path 'akuma-playground' already exists`. Fix: `busybox rm -rf akuma-playground` before clone. Playbook updated.
+
+**git clone ext2 issue resolved:** report_13 found git clone failing due to ext2 `O_CREAT` bug. In this session the clone succeeded — either the bug was fixed in akuma between report_13 and this run, or the workaround (different working directory) was effective.
+
+### summarize_prompt timing data
+
+| Session | Original bytes | Compressed bytes | Reduction | Duration |
+|---------|---------------|-----------------|-----------|----------|
+| compact_prompt session (KV cache hit) | 960 | 199 | 79% | ~0.1 s |
+| fresh session (cold, no compact_prompt) | 16,297 | 979 | 93% | ~75 s |
+| compact_prompt session (KV cache hit) | 960 | 127 | 86% | ~0.1 s |
+
+The 960-byte `original_bytes` for compact_prompt sessions is unexpectedly small — possibly the compressed prompt after a previous summarize call was picked up as the baseline. The 16,297-byte cold session is the uncompressed full prompt. `enable_thinking: false` deployed to qwen3:4b summarize calls this session — expected to reduce cold-start time significantly.
+
+### model quality notes
+
+- Correctly identified `libtcc1.a` as missing and searched for it systematically
+- Called `agentic_fetch` with `{"prompt":"Read all lines of file /dev/stdin"}` (hallucinated tool usage) — user cancelled it; session resumed cleanly with "continue"
+- Did not write report to file despite task instructions — wrote summary as chat text only
+- No archaeology loop until late in session when blocked on `libtcc1.a`
+
+### summarize_prompt: first full-stack timing data
+
+| Session | Original bytes | Compressed bytes | Reduction | Duration |
+|---------|---------------|-----------------|-----------|----------|
+| 18:13 (session 65c4ae4a, compact_prompt) | 960 | 199 | 79% | ~0.1 s (KV cache hit) |
+| 18:17 (new session) | 16,297 | 979 | 93% | ~75 s (cold) |
+| 18:19 (new session, compact_prompt) | 960 | 127 | 86% | ~0.1 s (KV cache hit) |
+
+The 960-byte `original_bytes` for sessions with `compact_prompt` is unexpected — may reflect the compressed prompt after `SetSystemPrompt` is called rather than the initial template size. The cold-start 75 s for 16,297 bytes → 979 bytes is the uncompressed session baseline.
+
+With `enable_thinking: false` added to the qwen3:4b summarize call (deployed this session), subsequent cold-start times should be significantly lower — qwen3:4b's thinking overhead was responsible for most of the 84 s measured in earlier sessions.
+
+### memory_scroll rendering fix (deployed this session)
+
+- `memory_scroll`, `memory_list`, `memory_grep` now have dedicated TUI renderers using `toolOutputPlainContent` instead of `renderToolResultTextContent`. This eliminates double line-numbering (TUI adds `1`, `2`... on top of stored `N|` format) and the `<file>` XML tag rendering glitch when view+scroll interact.
+- `maxScrollLimit` lowered from 200 → 50. Model can no longer fetch an entire file in one scroll call by passing `limit=total_lines`.
 
 ---
 

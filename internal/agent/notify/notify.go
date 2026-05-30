@@ -20,10 +20,11 @@ const (
 
 // Notification represents a domain event published by the agent.
 type Notification struct {
-	SessionID    string
-	SessionTitle string
-	Type         Type
-	ProviderID   string
+	SessionID      string
+	SessionTitle   string
+	Type           Type
+	ProviderID     string
+	ReductionPct   int // set for TypeSystemPromptCompressed
 }
 
 // RunComplete is the authoritative end-of-run signal for a session.

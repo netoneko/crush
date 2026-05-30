@@ -578,7 +578,7 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		}
 		result.SetSystemPrompt(systemPrompt)
 		if summarizePrompt {
-			go c.summarizeSystemPrompt(context.Background(), systemPrompt, small, result)
+			go c.summarizeSystemPrompt(ctx, systemPrompt, small, result)
 		}
 		return nil
 	})
@@ -1402,12 +1402,15 @@ func (c *coordinator) summarizeSystemPrompt(ctx context.Context, systemPrompt st
 
 	smallAgent := fantasy.NewAgent(
 		small.Model,
-		fantasy.WithMaxOutputTokens(int64(cmp.Or(small.ModelCfg.MaxTokens, 2048))),
+		fantasy.WithMaxOutputTokens(int64(max(small.ModelCfg.MaxTokens, 8192))),
 		fantasy.WithUserAgent(userAgent),
 	)
 
 	streamCall := fantasy.AgentStreamCall{
 		Prompt: summarizeInstruction + systemPrompt,
+		ProviderOptions: openaicompat.NewProviderOptions(&openaicompat.ProviderOptions{
+			ExtraBody: map[string]any{"enable_thinking": false},
+		}),
 	}
 
 	resp, err := smallAgent.Stream(ctx, streamCall)
@@ -1435,7 +1438,8 @@ func (c *coordinator) summarizeSystemPrompt(ctx context.Context, systemPrompt st
 
 	if c.notify != nil {
 		c.notify.Publish(pubsub.CreatedEvent, notify.Notification{
-			Type: notify.TypeSystemPromptCompressed,
+			Type:         notify.TypeSystemPromptCompressed,
+			ReductionPct: int(100 * (1 - float64(len(compressed))/float64(len(systemPrompt)))),
 		})
 	}
 }

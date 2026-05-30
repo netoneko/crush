@@ -3562,6 +3562,8 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		return tea.Batch(cmds...)
 	case notify.TypeReAuthenticate:
 		return m.handleReAuthenticate(n.ProviderID)
+	case notify.TypeSystemPromptCompressed:
+		return util.ReportInfo(fmt.Sprintf("System prompt compressed by %d%%", n.ReductionPct))
 	default:
 		return nil
 	}

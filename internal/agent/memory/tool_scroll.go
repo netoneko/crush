@@ -10,12 +10,12 @@ import (
 
 const MemoryScrollToolName = "memory_scroll"
 
-const maxScrollLimit = 200
+const maxScrollLimit = 50
 
 type memoryScrollParams struct {
 	ID     string `json:"id" description:"Memory reference ID returned by a previous tool call (e.g. mem_42)"`
 	Offset int    `json:"offset,omitempty" description:"Line offset to start reading from, 0-indexed (default: 0)"`
-	Limit  int    `json:"limit,omitempty" description:"Number of lines to return, max 200 (default: 50)"`
+	Limit  int    `json:"limit,omitempty" description:"Number of lines to return, max 50 (default: 50)"`
 }
 
 // NewMemoryScrollTool returns a tool that reads a window of lines from a
