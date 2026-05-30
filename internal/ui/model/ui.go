@@ -942,7 +942,11 @@ func (m *UI) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.status.SetInfoMsg(msg)
 		ttl := msg.TTL
-		if ttl <= 0 {
+		if ttl < 0 {
+			// Permanent — cleared when the next status message arrives.
+			break
+		}
+		if ttl == 0 {
 			ttl = DefaultStatusTTL
 		}
 		cmds = append(cmds, clearInfoMsgCmd(ttl))
@@ -3562,8 +3566,17 @@ func (m *UI) handleAgentNotification(n notify.Notification) tea.Cmd {
 		return tea.Batch(cmds...)
 	case notify.TypeReAuthenticate:
 		return m.handleReAuthenticate(n.ProviderID)
+	case notify.TypeSystemPromptCompressing:
+		return util.CmdHandler(util.InfoMsg{
+			Type: util.InfoTypeInfo,
+			Msg:  "Compressing system prompt...",
+			TTL:  -1, // permanent until replaced by TypeSystemPromptCompressed
+		})
 	case notify.TypeSystemPromptCompressed:
-		return util.ReportInfo(fmt.Sprintf("System prompt compressed by %d%%", n.ReductionPct))
+		return util.CmdHandler(util.InfoMsg{
+			Type: util.InfoTypeSuccess,
+			Msg:  fmt.Sprintf("System prompt compressed by %d%%", n.ReductionPct),
+		})
 	default:
 		return nil
 	}

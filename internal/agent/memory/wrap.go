@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -122,7 +123,18 @@ func (m *memoryTool) Run(ctx context.Context, call fantasy.ToolCall) (fantasy.To
 		}
 		slog.Debug("memory wrap: stored reference", "tool", call.Name, "id", id, "bytes", len(resp.Content))
 
-		lines := strings.Split(resp.Content, "\n")
+		// Prefer clean content from tool metadata (e.g. view tool strips <file>
+		// wrapper and line-number prefixes from its metadata.content field).
+		previewContent := resp.Content
+		if resp.Metadata != "" {
+			var meta map[string]any
+			if json.Unmarshal([]byte(resp.Metadata), &meta) == nil {
+				if c, ok := meta["content"].(string); ok && c != "" {
+					previewContent = c
+				}
+			}
+		}
+		lines := strings.Split(previewContent, "\n")
 		previewEnd := m.cfg.PreviewLines
 		if previewEnd > len(lines) {
 			previewEnd = len(lines)

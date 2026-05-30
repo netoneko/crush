@@ -1252,6 +1252,52 @@ With `enable_thinking: false` added to the qwen3:4b summarize call (deployed thi
 
 ---
 
+## Benchmark Run — 2026-05-30 (report_25, qwen3-yolo, 02_git_clone, uncompressed, ✅ ALL PASSED)
+
+**Task:** Run acceptance playbook `acceptance/02_git_clone.md` and write results to `tmp/acceptance/02_git_clone_report_25.md`
+**Model:** `qwen3-yolo:latest` (Qwen3 35B MoE, Q4_K_M, ~26.9 GiB VRAM)
+**Crush build:** Patched — memory + compact_tools + compact_prompt (no summarize_prompt)
+**Config:** `enable_memory: true`, `compact_tools: true`, `compact_prompt: true`, `summarize_prompt: false`
+**Result:** ✅ ALL PASSED — first clean end-to-end pass of `02_git_clone.md`
+
+### Step results
+
+| Step | Result | Notes |
+|------|--------|-------|
+| 4 Start VM | ✅ PASS | QEMU booted, SSH listening on port 2222 |
+| 5 `apk add git` | ✅ PASS | 17 packages installed; rc=255 expected (SSH drop after apk) |
+| 6 `git clone` + verify hello.c | ✅ PASS | Cloned, `hello.c` present in working tree; `main.go` also present |
+| 7 `apk add tcc musl-dev tcc-libs tcc-libs-static` | ✅ PASS | 4 packages, 30.8 MiB total |
+| 8 `tcc -B /usr/lib/tcc -o /tmp/hello_c hello.c` | ✅ PASS | Silent compile (no errors); binary produced |
+| 9 Run `/tmp/hello_c` | ✅ PASS | Output: `Hello, Akuma!` |
+
+### Key observations
+
+- **rc=255 handling correct.** All long-running apk installs and git clone drop the SSH connection; success determined by `OK:` / expected stdout, not return code. No false failures.
+- **`-B /usr/lib/tcc` fix effective.** The `libtcc1.a not found` blocker from report_22 was resolved by the playbook update; compiled successfully first try.
+- **ELF exec from `/tmp/` works.** The mini-shell exec-from-path restriction (`Unknown command: /tmp/hello`) seen in report_22 did not fire — `/tmp/hello_c` executed cleanly. The target path may matter; or the fix landed in akuma between runs.
+- **No archaeology loop.** All steps followed the playbook without diverging into akuma source analysis.
+- **Report written to file.** Unlike the compressed-prompt runs (report_23/24), the model correctly wrote its report as a file rather than chat output.
+- **`lnx-common` signing key warning is benign.** `WARNING: lnx-common-3.6.20-r1: signing key is unused` — advisory only, does not affect install success.
+
+### Context vs. report_22
+
+report_22 (partial pass) used `summarize_prompt: true` and the model wrote its summary as chat text rather than a file. report_25 (full pass) disabled prompt compression and the model correctly output the report file. This is consistent with the finding in §5 of `TOOLING_IMPROVEMENTS_COMPACT_SYSTEM_PROMPT.md` — both compressed-prompt runs (report_23/24) also failed to produce output files, while all uncompressed runs produced correct file output.
+
+### Milestone: 02_git_clone acceptance test ✅ CLEARED (2026-05-30)
+
+The `02_git_clone.md` playbook now passes end-to-end with `qwen3-yolo:latest` + patched crush (memory + compact_tools + compact_prompt). All blockers that blocked previous runs have been resolved:
+
+| Blocker | Fix |
+|---------|-----|
+| `libtcc1.a not found` | Added `-B /usr/lib/tcc` to compile step |
+| ELF exec path restriction | Compile target updated to work with mini-shell |
+| Stale clone artifact | `busybox rm -rf akuma-playground` before clone |
+| git clone ext2 `O_CREAT` bug | Fixed in akuma kernel |
+| Repo was private | Repo made public |
+
+---
+
 ## Planned fixes (priority order)
 
 Based on all benchmark runs to date, the following improvements are prioritized:
@@ -1277,3 +1323,11 @@ Based on all benchmark runs to date, the following improvements are prioritized:
 9. ~~**File read deduplication** (issue #2)~~ **NOT NEEDED** — `read_files` table is not a prompt source; see analysis above.
 
 10. ~~**Taskmaster (`enable_task_self_assessment`) wiring**~~ **CONFIRMED WORKING** — fires after clean run completion, injects self-assessment prompt, model responds with 133-token completion. Enable in akuma crush.json with `enable_task_self_assessment: true`.
+
+## Milestone tracker
+
+| Milestone | Status | Run | Date |
+|-----------|--------|-----|------|
+| `01_verify_apk_bootstrap.md` passes clean | ✅ CLEARED | report_17 | 2026-05-29 |
+| `02_git_clone.md` passes clean | ✅ CLEARED | report_25 | 2026-05-30 |
+| `summarize_prompt` produces no regression | ❌ BLOCKED | report_23/24 | 2026-05-30 |

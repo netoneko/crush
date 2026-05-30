@@ -123,7 +123,9 @@ func New(ctx context.Context, conn *sql.DB, store *config.ConfigStore, skillsMgr
 	app.setupEvents()
 
 	// Check for updates in the background.
-	go app.checkForUpdates(ctx)
+	if !cfg.Options.DisableUpdateCheck {
+		go app.checkForUpdates(ctx)
+	}
 
 	go mcp.Initialize(ctx, app.Permissions, store)
 
