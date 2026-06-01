@@ -256,6 +256,13 @@ func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error
 		return nil, nil, err
 	}
 
+	if debug {
+		fmt.Fprintf(os.Stderr, "crush: debug: ResolveCwd returned: %q\n", cwd)
+		if realCwd, err := os.Getwd(); err == nil {
+			fmt.Fprintf(os.Stderr, "crush: debug: actual os.Getwd() is: %q\n", realCwd)
+		}
+	}
+
 	store, err := config.Init(cwd, dataDir, debug)
 	if err != nil {
 		return nil, nil, err
@@ -264,15 +271,12 @@ func setupLocalWorkspace(cmd *cobra.Command) (workspace.Workspace, func(), error
 	cfg := store.Config()
 	store.Overrides().SkipPermissionRequests = yolo
 
-	if err := os.MkdirAll(cfg.Options.DataDirectory, 0o700); err != nil {
-		return nil, nil, fmt.Errorf("failed to create data directory: %q %w", cfg.Options.DataDirectory, err)
+	if debug {
+		fmt.Fprintf(os.Stderr, "crush: debug: cfg.Options.DataDirectory is: %q\n", cfg.Options.DataDirectory)
 	}
 
-	gitIgnorePath := filepath.Join(cfg.Options.DataDirectory, ".gitignore")
-	if _, err := os.Stat(gitIgnorePath); os.IsNotExist(err) {
-		if err := os.WriteFile(gitIgnorePath, []byte("*\n"), 0o644); err != nil {
-			return nil, nil, fmt.Errorf("failed to create .gitignore file: %q %w", gitIgnorePath, err)
-		}
+	if err := createDotCrushDir(cfg.Options.DataDirectory); err != nil {
+		return nil, nil, err
 	}
 
 	if err := projects.Register(cwd, cfg.Options.DataDirectory); err != nil {
@@ -810,8 +814,20 @@ func ResolveCwd(cmd *cobra.Command) (string, error) {
 }
 
 func createDotCrushDir(dir string) error {
+	debug := os.Getenv("CRUSH_DEBUG") != "" || strings.Contains(strings.Join(os.Args, " "), "--debug")
+	if debug {
+		fmt.Fprintf(os.Stderr, "crush: debug: createDotCrushDir(%q)\n", dir)
+	}
+
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		if debug {
+			fmt.Fprintf(os.Stderr, "crush: debug: MkdirAll(%q) FAILED: %v\n", dir, err)
+		}
 		return fmt.Errorf("failed to create data directory: %q %w", dir, err)
+	}
+
+	if debug {
+		fmt.Fprintf(os.Stderr, "crush: debug: MkdirAll(%q) SUCCESS\n", dir)
 	}
 
 	gitIgnorePath := filepath.Join(dir, ".gitignore")

@@ -17,12 +17,11 @@ import (
 var (
 	pragmas = map[string]string{
 		"foreign_keys":  "ON",
-		"journal_mode":  "WAL",
+		"journal_mode":  "DELETE", // WAL requires shared memory and locking
 		"page_size":     "4096",
-		"temp_store":    "MEMORY",
-		"cache_size":    "-8000",
-		"synchronous":   "NORMAL",
-		"secure_delete": "ON",
+		"cache_size":    "-2000", // Reduced cache size to save memory
+		"synchronous":   "OFF",   // Safer for environments with limited fsync support
+		"secure_delete": "OFF",
 		"busy_timeout":  "30000",
 	}
 	gooseInitOnce sync.Once
