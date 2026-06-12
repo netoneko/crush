@@ -1324,10 +1324,82 @@ Based on all benchmark runs to date, the following improvements are prioritized:
 
 10. ~~**Taskmaster (`enable_task_self_assessment`) wiring**~~ **CONFIRMED WORKING** — fires after clean run completion, injects self-assessment prompt, model responds with 133-token completion. Enable in akuma crush.json with `enable_task_self_assessment: true`.
 
+---
+
+## Benchmark Runs — 2026-06-12 (07_tcc_static, extreme kernel, 4 MB)
+
+**Task:** Run acceptance playbook `acceptance/07_tcc_static_prerequisites.md` and write results to `tmp/acceptance/07_tcc_static_report_N.md`
+**Kernel:** extreme-size (`scripts/build_extreme_size.sh`), 4096K RAM
+**Config:** `enable_memory: true`, `memory_hard_limit_bytes: 2048`, `compact_tools: true`, `compact_prompt: true`
+
+### Playbook rewrite (2026-06-12)
+
+The original `07_tcc_static_prerequisites.md` had three bugs discovered during model testing:
+
+1. **File name mismatch:** Playbook referenced `/tmp/t.c` but `bootstrap/tmp/` contains `hello.c`. Fixed to `hello.c`.
+2. **Expected output mismatch:** Playbook asserted `"hello tcc"` but `hello.c` prints `"Hello, Akuma!"`. Fixed to `"Hello"` prefix check.
+3. **Standard (non-extreme) kernel:** Original playbook used `cargo run --release` (256MB). Rewritten to use extreme kernel at 4.0 MB — the playbook is specifically about the 4 MB floor.
+
+The playbook was also restructured to match the `02_git_clone.md` format: preparation steps, SSH helper, step-by-step Python code, expected output per step, failure modes table.
+
+### Run results
+
+| Model | Size | Result | Report | Notes |
+|-------|------|--------|--------|-------|
+| `qwen3-yolo` | 23 GB | ✅ PASS | `07_tcc_static_report_1.md` | ~10 min; needed to navigate cargo_runner.sh ELF path; good quality report |
+| `qwen3:4b` | 2.5 GB | ✅ PASS | `07_tcc_static_report_2_qwen3-4b.md` | ~2 min; minimal report ("Done"); needed `default_max_tokens` bumped to 16384 |
+| `gemma4-yolo:latest` | 17 GB | ✅ PASS | `07_tcc_static_report_3_gemma4-yolo.md` | Detailed report with tcc open traces; needed `default_max_tokens: 16384` |
+| `gemma4:31b-it-q4_K_M` | 19 GB | ❌ FAIL | — | crush exits after model emits `<tool_call\|>` as content alongside proper `tool_calls` array; 12 bytes output, no recovery |
+| `gemma4:e4b` | 9.6 GB | ❌ FAIL | — | reasoning-only output, `finish_reason: "stop"` with 846 think tokens and zero tool calls |
+| `gemma4-yolo-4b:latest` | 9.6 GB | ❌ FAIL | — | called `job_output(wait=true)` on QEMU process (forbidden); read playbook 5× before acting; timed out at 600s |
+| `gemma4:26b-a4b-it-q4_K_M` | 17 GB | ✅ PASS | `07_tcc_static_report_5_gemma4-26b.md` | All steps passed; report write failed (crush write-guard); written manually from debug log |
+
+### New finding: qwen3:4b hits output token limit due to reasoning
+
+`qwen3:4b` is a reasoning model — it emits `<think>` tokens before content. With `default_max_tokens: 2048`, the model exhausted its entire output budget on reasoning chains, producing `finish_reason: "length"` with no tool calls or content. Fix: raise `default_max_tokens` to 16384 in `~/.local/share/crush/crush.json`. After the fix, the model completed the task successfully.
+
+This does NOT affect `qwen3-yolo` (which does not emit `<think>` tokens in Ollama-served mode).
+
+### New finding: base Gemma4 models cannot reliably use crush tools
+
+Tested `gemma4:31b-it-q4_K_M` and `gemma4:e4b`. Both fail, but in different ways:
+
+**gemma4:31b:** emits the literal string `<tool_call|>` as a content chunk in the **same streaming response** that contains a valid `tool_calls` array. crush processes the tool call on turn 1, but on subsequent turns the model gets stuck producing only `<tool_call|>` (12 bytes) and exits.
+
+**gemma4:e4b:** reasoning-only output. Produces `finish_reason: "stop"` with ~846 `<think>` tokens and zero tool calls or content. The model thinks about the problem but doesn't know how to invoke tools.
+
+Both failure modes stem from the base Gemma4 template's poor alignment with OpenAI-style tool use. The `yolo` fine-tunes (`gemma4-yolo:latest`, `gemma4-yolo-4b:latest`) were specifically trained to suppress these artifacts and reliably emit tool calls.
+
+**Exception:** `gemma4:26b-a4b-it-q4_K_M` (MoE, 4B active of 26B total) **passes** — it made 9+ tool calls correctly and ran the full playbook. Its MoE routing may select a different set of experts for tool-following than the dense 31b model. Use `gemma4:26b-a4b` or `gemma4-yolo` variants; avoid dense `gemma4:31b` and `gemma4:e4b` base variants.
+
+### gemma4-yolo-4b as crush agent vs. meow model
+
+`gemma4-yolo-4b:latest` (9.6 GB) **fails** as a crush agent running acceptance/07: it called `job_output(wait=true)` on the QEMU background process (explicitly forbidden — QEMU runs forever), then timed out at 600s without writing a report. It also read the playbook file 5 times before acting, showing poor instruction-following at the agent level.
+
+However, this doesn't predict its performance as the **meow model** in acceptance/08. In that role, meow (not crush) is the agent — the model only receives a single-turn prompt and must emit sequential shell tool calls. That's a much simpler task and the 4B yolo fine-tune may handle it well.
+
+### cargo_runner.sh ELF path discovery
+
+`qwen3-yolo` correctly discovered that `scripts/cargo_runner.sh` requires the ELF path as `$1` and that the extreme-size binary is at `target/aarch64-unknown-none/extreme-size/akuma`. The script invocation is:
+```bash
+ELF=target/aarch64-unknown-none/extreme-size/akuma
+MEMORY=4096K SNAPSHOT=1 INSTANCE=0 bash scripts/cargo_runner.sh "$ELF" 2>&1 | tee 07_tcc_static.log
+```
+This should be documented explicitly in the playbook (it now is, post-rewrite).
+
+---
+
 ## Milestone tracker
 
 | Milestone | Status | Run | Date |
 |-----------|--------|-----|------|
 | `01_verify_apk_bootstrap.md` passes clean | ✅ CLEARED | report_17 | 2026-05-29 |
 | `02_git_clone.md` passes clean | ✅ CLEARED | report_25 | 2026-05-30 |
+| `07_tcc_static_prerequisites.md` passes (qwen3-yolo, 4 MB) | ✅ CLEARED | report_1 | 2026-06-12 |
+| `07_tcc_static_prerequisites.md` passes (qwen3:4b, 4 MB) | ✅ CLEARED | report_2 | 2026-06-12 |
+| `07_tcc_static_prerequisites.md` passes (gemma4-yolo, 4 MB) | ✅ CLEARED | report_3 | 2026-06-12 |
+| `07_tcc_static_prerequisites.md` passes (gemma4:26b-a4b, 4 MB) | ✅ CLEARED | report_5 | 2026-06-12 |
+| `08_meow_clone_compile_run.md` passes (meow→qwen3:4b) | ⏳ TODO | — | — |
+| `08_meow_clone_compile_run.md` passes (meow→gemma4-yolo-4b) | ⏳ TODO | — | — |
+| `08_meow_clone_compile_run.md` passes (meow→qwen3.5:0.8b) | ⏳ TODO (stretch) | — | — |
 | `summarize_prompt` produces no regression | ❌ BLOCKED | report_23/24 | 2026-05-30 |
