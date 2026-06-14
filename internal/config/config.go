@@ -271,6 +271,7 @@ type Options struct {
 	// verbatim. After defaulting the stored value is always absolute.
 	DataDirectory             string       `json:"data_directory,omitempty" jsonschema:"description=Directory for storing application data. Relative paths are resolved against the working directory; absolute paths are used as-is.,default=.crush,example=.crush"`
 	DisabledTools             []string     `json:"disabled_tools,omitempty" jsonschema:"description=List of built-in tools to disable and hide from the agent,example=bash,example=sourcegraph"`
+	TaskTools                 []string     `json:"task_tools,omitempty" jsonschema:"description=Tools the spawned Task (sub-)agent may call. Built-in tool names plus the special token 'mcp' (grants all MCP tools). Defaults to the read-only set (glob/grep/ls/sourcegraph/view) with no MCP when unset. Disabled tools are still excluded.,example=view,example=write,example=mcp"`
 	DisableProviderAutoUpdate bool         `json:"disable_provider_auto_update,omitempty" jsonschema:"description=Disable providers auto-update,default=false"`
 	DisableDefaultProviders   bool         `json:"disable_default_providers,omitempty" jsonschema:"description=Ignore all default/embedded providers. When enabled\\, providers must be fully specified in the config file with base_url\\, models\\, and api_key - no merging with defaults occurs,default=false"`
 	Attribution               *Attribution `json:"attribution,omitempty" jsonschema:"description=Attribution settings for generated content"`
@@ -729,6 +730,31 @@ func resolveReadOnlyTools(tools []string) []string {
 	return filterSlice(tools, readOnlyTools, true)
 }
 
+// resolveTaskTools resolves the built-in tools available to the Task (sub-)agent.
+// When task_tools is unset it defaults to the read-only set; when configured it is
+// the configured list intersected with allowedTools (so disabled_tools still wins).
+// The special token "mcp" is not a built-in tool — it is handled by resolveTaskMCP
+// and ignored here (it simply won't match any built-in name).
+func resolveTaskTools(allowedTools []string, configured []string) []string {
+	if len(configured) == 0 {
+		return resolveReadOnlyTools(allowedTools)
+	}
+	return filterSlice(allowedTools, configured, true)
+}
+
+// taskMCPToken in task_tools grants the Task (sub-)agent access to ALL MCP tools.
+const taskMCPToken = "mcp"
+
+// resolveTaskMCP decides the Task agent's MCP access from task_tools: if the special
+// "mcp" token is present, return nil (no restriction = all MCP tools); otherwise an
+// empty map (no MCP tools) — preserving the historical default.
+func resolveTaskMCP(configured []string) map[string][]string {
+	if slices.Contains(configured, taskMCPToken) {
+		return nil
+	}
+	return map[string][]string{}
+}
+
 func filterSlice(data []string, mask []string, include bool) []string {
 	var filtered []string
 	for _, s := range data {
@@ -760,9 +786,11 @@ func (c *Config) SetupAgents() {
 			Description:  "An agent that helps with searching for context and finding implementation details.",
 			Model:        SelectedModelTypeLarge,
 			ContextPaths: c.Options.ContextPaths,
-			AllowedTools: resolveReadOnlyTools(allowedTools),
-			// NO MCPs or LSPs by default
-			AllowedMCP: map[string][]string{},
+			// Built-in tools for the sub-agent come from `task_tools` (defaults to the read-only
+			// set when unset). Including the special token "mcp" in task_tools also grants the
+			// sub-agent ALL MCP tools, so it can investigate via MCP-backed data sources.
+			AllowedTools: resolveTaskTools(allowedTools, c.Options.TaskTools),
+			AllowedMCP:   resolveTaskMCP(c.Options.TaskTools),
 		},
 	}
 	c.Agents = agents

@@ -1306,7 +1306,7 @@ Based on all benchmark runs to date, the following improvements are prioritized:
 
 2. ~~**`memory_grep`**~~ **DONE** — `memory_grep(id, pattern, context_lines)` added. Replaces high-limit `memory_scroll` calls.
 
-3. ~~**Compact tool descriptions**~~ **DONE** — `compact_tools: true` in crush.json options. Saves ~1,650 tokens from tool schema at session start (−15%). Per-tool compact wrappers in `internal/agent/tools/compact.go` and `internal/agent/memory/compact.go`; no upstream constructors modified.
+3. ~~**Compact tool descriptions**~~ **DONE** — `compact_tools: true` in crush.json options. Saves ~1,650 tokens from tool schema at session start (−15%). Per-tool compact wrappers in `internal/agent/tools/compact.go` and `internal/agent/memory/compact.go`; no upstream constructors modified. **Extended 2026-06-14 (see [§ compact_tools v2](#compact_tools-v2--schema-stripping--all-tools-2026-06-14)):** `compact_tools` now also strips verbose JSON-Schema annotations from EVERY tool's `inputSchema` (not just descriptions of 13 built-ins), and applies to MCP tools too.
 
 4. ~~**Memory refuse strategy for paginated tools**~~ **DONE** — `memory_refuse_tools: ["view"]` rejects oversized results and tells the model to re-call with `offset`/`limit`. Implemented via `StrategyRefuse` in `internal/agent/memory/wrap.go`.
 
@@ -1403,3 +1403,52 @@ This should be documented explicitly in the playbook (it now is, post-rewrite).
 | `08_meow_clone_compile_run.md` passes (meow→gemma4-yolo-4b) | ⏳ TODO | — | — |
 | `08_meow_clone_compile_run.md` passes (meow→qwen3.5:0.8b) | ⏳ TODO (stretch) | — | — |
 | `summarize_prompt` produces no regression | ❌ BLOCKED | report_23/24 | 2026-05-30 |
+
+---
+
+## compact_tools v2 — schema stripping + all tools (2026-06-14)
+
+**Problem.** The original `compact_tools` only swapped a tool's **description** string, and only for
+**13 hand-wrapped built-ins** (`ApplyCompact`'s wrapper map). It never touched:
+- the **`inputSchema`** (the JSON parameter schema — param types + per-property `description`/`title`/
+  `examples`/`default` prose), which is typically the *larger* half of a tool definition;
+- the ~12 other built-ins (`download`, `fetch`, `agentic_fetch`, `sourcegraph`, `glob`, `crush_info`,
+  `crush_logs`, LSP/MCP-resource tools);
+- **MCP tools** at all.
+
+So on a real local-model session the per-request tool floor stayed high (~40k tokens observed with a
+7-tool MCP server) even with `compact_tools: true` — because the floor is dominated by ~30 tool
+**schemas**, which compaction left untouched. "Compact" was a description trim, not a schema cut.
+
+**Fix (`internal/agent/tools/compact.go`).**
+1. **Schema stripping for every tool.** New `compactSchemaValue` recursively removes verbose
+   JSON-Schema annotation keywords (`description`, `title`, `examples`, `example`, `$comment`,
+   `default`) from a tool's `Parameters`, while preserving all structural keywords (`type`,
+   `properties`, `items`, `enum`, `required`, `anyOf`, …). It is **schema-aware**: keys inside named
+   sub-schema containers (`properties`, `patternProperties`, `$defs`, `definitions`) are treated as
+   user-defined names and preserved — so a parameter literally named `description` is kept, while the
+   `description` *keyword* on a property is dropped.
+2. **`compactTool.Info()` now compacts the schema** in addition to (optionally) overriding the
+   description. An empty `desc` keeps the original description but **still** compacts the schema.
+3. **`ApplyCompact` now wraps ALL tools**, not just the 13: hand-wrapped built-ins get their short
+   description **plus** schema compaction; every other tool (including **MCP tools**, which flow
+   through `ApplyCompact` in `coordinator.buildTools`) gets schema compaction with its original
+   description.
+
+Net: with `compact_tools: true`, every tool the model sees — built-in and MCP — ships a stripped
+schema. Param *names* and *enums* (what the model needs to emit a valid call) are retained; the
+human-facing prose is dropped.
+
+**Complementary lever — remove tools entirely.** Compaction shrinks a schema; it can't delete one.
+The bigger floor win is not sending unused tools at all, via `options.disabled_tools` (+
+`auto_lsp: false` for the 3 LSP tools). For a narrow workload (e.g. an MCP-driven analyst that only
+needs `write`, `todos`, `agent` + its MCP tools), disabling ~10–20 built-ins removes whole schemas.
+The two stack: disable what you don't need, compact what remains.
+
+**Behavioral caveat.** Stripping per-parameter `description`s can remove usage hints a model relied
+on. Mitigations: param names + `enum`s are preserved, and tool-level descriptions still carry the
+key guidance. Validate per workload; re-enable a tool (or rely on its tool-level description) if you
+see malformed calls.
+
+**Status:** implemented + builds clean (`go build`, `go vet`); rendered token-floor reduction
+measurement pending a benchmark run.

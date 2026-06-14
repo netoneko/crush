@@ -7,8 +7,10 @@ import (
 	"charm.land/fantasy"
 )
 
-// compactTool wraps an AgentTool and substitutes a shorter description.
-// Used when compact_tools is enabled to reduce tool schema token cost.
+// compactTool wraps an AgentTool and substitutes a shorter description and a
+// stripped-down parameter schema. Used when compact_tools is enabled to reduce
+// tool schema token cost. A non-empty desc overrides the tool's description; an
+// empty desc keeps the original. The parameter schema is always compacted.
 type compactTool struct {
 	fantasy.AgentTool
 	desc string
@@ -16,12 +18,84 @@ type compactTool struct {
 
 func (t compactTool) Info() fantasy.ToolInfo {
 	info := t.AgentTool.Info()
-	info.Description = t.desc
+	if t.desc != "" {
+		info.Description = t.desc
+	}
+	info.Parameters = compactSchemaMap(info.Parameters)
 	return info
 }
 
 func withCompact(tool fantasy.AgentTool, desc string) fantasy.AgentTool {
 	return compactTool{AgentTool: tool, desc: desc}
+}
+
+// compactSchemaKeywords are verbose JSON-Schema annotation keywords that carry
+// human prose for documentation but are NOT needed for the model to emit a
+// valid tool call. Stripping them shrinks the inputSchema token cost. Structural
+// keywords (type, properties, items, enum, required, anyOf, ...) are preserved.
+var compactSchemaKeywords = map[string]bool{
+	"description": true,
+	"title":       true,
+	"examples":    true,
+	"example":     true,
+	"$comment":    true,
+	"default":     true,
+}
+
+// schemaChildContainers hold NAMED sub-schemas whose keys are user-defined
+// names (property/definition names), not schema keywords — so their keys must
+// be preserved while their values are recursively compacted.
+var schemaChildContainers = map[string]bool{
+	"properties":        true,
+	"patternProperties": true,
+	"$defs":             true,
+	"definitions":       true,
+}
+
+// compactSchemaValue recursively strips annotation keywords from a JSON-Schema
+// value. It is schema-aware: keys inside a named-sub-schema container (e.g.
+// "properties") are treated as names and preserved; only schema-level keyword
+// keys are dropped.
+func compactSchemaValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, val := range x {
+			if schemaChildContainers[k] {
+				if m, ok := val.(map[string]any); ok {
+					nm := make(map[string]any, len(m))
+					for name, sub := range m {
+						nm[name] = compactSchemaValue(sub)
+					}
+					out[k] = nm
+					continue
+				}
+			}
+			if compactSchemaKeywords[k] {
+				continue
+			}
+			out[k] = compactSchemaValue(val)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, e := range x {
+			out[i] = compactSchemaValue(e)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func compactSchemaMap(m map[string]any) map[string]any {
+	if m == nil {
+		return nil
+	}
+	if r, ok := compactSchemaValue(m).(map[string]any); ok {
+		return r
+	}
+	return m
 }
 
 // CompactBashTool wraps a bash tool with a shorter description that keeps
@@ -106,8 +180,11 @@ func CompactFileGrepTool(tool fantasy.AgentTool) fantasy.AgentTool {
 	return withCompact(tool, "file_grep(pattern, path, include) → matching file paths and line numbers.")
 }
 
-// ApplyCompact wraps a slice of tools, replacing descriptions for tools that
-// have a compact variant. Tools without a compact variant are returned as-is.
+// ApplyCompact compacts a slice of tools. EVERY tool gets its parameter schema
+// stripped of verbose annotation keywords (see compactSchemaValue). Tools with a
+// hand-written compact variant additionally get a shortened description; all
+// other tools (including MCP tools) keep their original description but still get
+// the schema compaction. This applies to built-in and MCP tools alike.
 func ApplyCompact(toolList []fantasy.AgentTool) []fantasy.AgentTool {
 	wrappers := map[string]func(fantasy.AgentTool) fantasy.AgentTool{
 		BashToolName:      CompactBashTool,
@@ -127,9 +204,9 @@ func ApplyCompact(toolList []fantasy.AgentTool) []fantasy.AgentTool {
 	result := make([]fantasy.AgentTool, len(toolList))
 	for i, t := range toolList {
 		if wrap, ok := wrappers[t.Info().Name]; ok {
-			result[i] = wrap(t)
+			result[i] = wrap(t) // short description + schema compaction
 		} else {
-			result[i] = t
+			result[i] = withCompact(t, "") // schema compaction only, keep description
 		}
 	}
 	return result
