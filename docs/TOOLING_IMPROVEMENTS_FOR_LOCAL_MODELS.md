@@ -1452,3 +1452,57 @@ see malformed calls.
 
 **Status:** implemented + builds clean (`go build`, `go vet`); rendered token-floor reduction
 measurement pending a benchmark run.
+
+---
+
+## Sub-agent tooling: configurable `task_tools` + MCP, and a permission deadlock fix (2026-06-14)
+
+Motivated by a sub-agent fan-out workload (one investigator sub-agent per item, each writing an
+intermediate `.md` the orchestrator consumes). Two blockers in the default Task-agent setup, both fixed.
+
+### 1. The Task (sub-)agent's toolset is now configurable — `task_tools` + the `mcp` token
+
+Previously the spawned Task agent was hardwired to `resolveReadOnlyTools(...)` = `glob/grep/ls/
+sourcegraph/view` with **`AllowedMCP: map[string][]string{}` (no MCP)**. That makes a sub-agent
+useless for any data-driven job — it can't call MCP tools and can't `write` an artifact.
+
+- New `options.task_tools` (`internal/config/config.go`): the built-in tools the Task agent may call.
+  Unset → defaults to the read-only set (backward compatible). Configured → that list, intersected
+  with `allowedTools` (so `disabled_tools` still wins). Resolver: `resolveTaskTools`.
+- The special token **`"mcp"`** in `task_tools` grants the Task agent **all MCP tools**
+  (`resolveTaskMCP` → `AllowedMCP: nil`); absent → no MCP (the historical default). Memory tools
+  remain auto-injected when `enable_memory` is on.
+- Example: `"task_tools": ["view","ls","glob","grep","write","todos","memory_scroll","mcp"]`.
+
+### 2. Sub-agent tool calls deadlocked on an unanswered permission request — FIXED
+
+**Symptom:** in non-interactive `crush run`, spawning a sub-agent that then called any
+permission-gated tool (e.g. an MCP tool) hung forever — 0% CPU on both crush and the model, no
+progress. A `SIGQUIT` goroutine dump pinpointed it:
+
+```
+coordinator.runSubAgent → sessionAgent.Run → (sub-agent) Tool.Run (mcp-tools.go)
+  → permission.(*permissionService).Request (permission.go:272)  ← blocked on respCh forever
+```
+
+**Root cause:** non-interactive mode auto-approves only the **main** session
+(`app.go`: `Permissions.AutoApproveSession(sess.ID)`). `runSubAgent` creates a **child session** that
+was never auto-approved, so the sub-agent's permission `Request` blocked on a prompt with no responder.
+(`agentic_fetch_tool` already auto-approved its sub-session via `SessionSetup`; the generic `agent`
+tool simply omitted it.)
+
+**Fix — inherit the parent's permission posture** (not a new config flag):
+- Added `IsAutoApproved(sessionID) bool` to the permission `Service` (`internal/permission/permission.go`).
+- `agentTool` (`internal/agent/agent_tool.go`) now passes a `SessionSetup` that auto-approves the
+  sub-session **iff the parent session is auto-approved**:
+  ```go
+  SessionSetup: func(subSessionID string) {
+      if c.permissions.IsAutoApproved(sessionID) { c.permissions.AutoApproveSession(subSessionID) }
+  }
+  ```
+- Invariant preserved: non-interactive runs work; interactive runs still surface sub-agent permission
+  prompts to the user; a sub-agent never gains more authority than its parent.
+
+**Verified:** a minimal repro (spawn one sub-agent → one MCP `query_costs` → exit) hung before the
+fix and now completes cleanly (`NESTED_MCP_RESULT: 41`, exit 0). Builds clean; permission `Service`
+mocks in `internal/agent/tools/*_test.go` updated with `IsAutoApproved`.

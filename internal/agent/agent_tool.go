@@ -62,6 +62,16 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 				ToolCallID:     call.ID,
 				Prompt:         params.Prompt,
 				SessionTitle:   "New Agent Session",
+				// Inherit the parent's permission posture: if the parent session is
+				// auto-approved (e.g. non-interactive `crush run`), auto-approve the
+				// sub-session too so its tool/MCP calls don't block on a prompt that
+				// has no responder. In interactive mode the parent isn't auto-approved,
+				// so the sub-agent's requests still surface to the user.
+				SessionSetup: func(subSessionID string) {
+					if c.permissions.IsAutoApproved(sessionID) {
+						c.permissions.AutoApproveSession(subSessionID)
+					}
+				},
 			})
 		},
 	), nil

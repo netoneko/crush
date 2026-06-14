@@ -224,7 +224,8 @@ func (m *mockViewPermissionService) GrantPersistent(req permission.PermissionReq
 	return true
 }
 
-func (m *mockViewPermissionService) AutoApproveSession(sessionID string) {}
+func (m *mockViewPermissionService) AutoApproveSession(sessionID string)  {}
+func (m *mockViewPermissionService) IsAutoApproved(sessionID string) bool { return false }
 
 func (m *mockViewPermissionService) SetSkipRequests(skip bool) {}
 
