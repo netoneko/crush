@@ -359,6 +359,13 @@ func (s *service) ParseAgentToolSessionID(sessionID string) (messageID string, t
 
 // IsAgentToolSession checks if a session ID follows the agent tool session format
 func (s *service) IsAgentToolSession(sessionID string) bool {
-	_, _, ok := s.ParseAgentToolSessionID(sessionID)
-	return ok
+	return IsAgentToolSessionID(sessionID)
+}
+
+// IsAgentToolSessionID reports whether a session ID follows the agent tool
+// (sub-agent) session format "messageID$$toolCallID". It is the package-level
+// form of Service.IsAgentToolSession for callers that only hold the ID string
+// and have no service handle (e.g. the non-interactive stdout streamer).
+func IsAgentToolSessionID(sessionID string) bool {
+	return len(strings.Split(sessionID, "$$")) == 2
 }

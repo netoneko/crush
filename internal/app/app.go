@@ -326,6 +326,18 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 	messageReadBytes := make(map[string]int)
 	var printed bool
 
+	// When enabled, the live output of spawned sub-agents (the agent tool,
+	// which runs in child sessions) is streamed to stdout in addition to the
+	// top-level session's output. Otherwise only the top-level session streams
+	// and a sub-agent's work is surfaced solely as its tool result. When on, a
+	// prefixer labels each writer switch so interleaved top-level and sub-agent
+	// output can be told apart on the merged stdout stream.
+	streamSubagents := app.config.Config().Options.StreamSubagentOutput
+	var prefixer *format.StreamPrefixer
+	if streamSubagents {
+		prefixer = format.NewStreamPrefixer(sess.ID)
+	}
+
 	defer func() {
 		if progress && stderrTTY {
 			_, _ = fmt.Fprintf(os.Stderr, ansi.ResetProgressBar)
@@ -357,7 +369,9 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 
 		case event := <-messageEvents:
 			msg := event.Payload
-			if msg.SessionID == sess.ID && msg.Role == message.Assistant && len(msg.Parts) > 0 {
+			belongs := msg.SessionID == sess.ID ||
+				(streamSubagents && session.IsAgentToolSessionID(msg.SessionID))
+			if belongs && msg.Role == message.Assistant && len(msg.Parts) > 0 {
 				stopSpinner()
 
 				content := msg.Content().String()
@@ -377,6 +391,11 @@ func (app *App) RunNonInteractive(ctx context.Context, output io.Writer, prompt,
 				// Ignore initial whitespace-only messages.
 				if printed || strings.TrimSpace(part) != "" {
 					printed = true
+					if prefixer != nil {
+						if hdr := prefixer.Prefix(msg.SessionID); hdr != "" {
+							fmt.Fprint(output, hdr)
+						}
+					}
 					fmt.Fprint(output, part)
 				}
 				messageReadBytes[msg.ID] = len(content)

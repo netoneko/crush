@@ -330,6 +330,14 @@ type Options struct {
 	// version. A log line is emitted when the summarization completes. Requires
 	// the small model to be configured.
 	SummarizePrompt bool `json:"summarize_prompt,omitempty" jsonschema:"description=Async: use the small model to compress the system prompt at session start. First turn uses the base prompt; later turns use the summarized version.,default=false"`
+	// StreamSubagentOutput controls whether the live output of spawned
+	// sub-agents (the "agent" tool) is streamed to stdout in non-interactive
+	// mode (crush run). Sub-agents run in child sessions whose output is
+	// normally hidden and surfaced only as the tool result handed back to the
+	// top-level agent. When enabled, their assistant text is streamed to stdout
+	// alongside the top-level agent's output. Has no effect in the interactive
+	// TUI, which renders child sessions on its own.
+	StreamSubagentOutput bool `json:"stream_subagent_output,omitempty" jsonschema:"description=In non-interactive mode (crush run)\\, stream the live output of spawned sub-agents (the agent tool) to stdout in addition to the top-level agent's output. Sub-agents run in child sessions whose output is otherwise surfaced only as a tool result.,default=false"`
 }
 
 // TaskSelfAssessmentConfig tunes the follow-up reminders Crush injects when

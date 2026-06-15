@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/crush/internal/format"
 	"github.com/charmbracelet/crush/internal/proto"
 	"github.com/charmbracelet/crush/internal/pubsub"
 	"github.com/stretchr/testify/require"
@@ -305,6 +306,167 @@ func TestRunStream_RunIDSuppressesLiveMessagesAndPrintsRunComplete(t *testing.T)
 	require.NoError(t, err)
 	require.True(t, done)
 	require.Equal(t, "streamed prefix final", buf.String())
+}
+
+// subAgentSession is a session ID in the agent-tool (sub-agent) format
+// "messageID$$toolCallID" produced by Service.CreateAgentToolSessionID.
+const subAgentSession = "parent-msg$$tool-call-1"
+
+// TestRunStream_SubAgentStreamsWhenEnabled verifies that with
+// streamSubagents enabled, a spawned sub-agent's assistant output (which
+// lives in a child agent-tool session) is streamed live to stdout even
+// though a RunID correlator is set for the top-level turn. Sub-agent
+// sessions have no RunComplete of ours to reconcile against, so they must
+// stream live rather than being suppressed like the parent's own messages.
+func TestRunStream_SubAgentStreamsWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	s := &runStream{
+		sessionID:       "S",
+		runID:           "run-mine",
+		out:             buf,
+		read:            map[string]int{},
+		streamSubagents: true,
+	}
+
+	done, err := s.handle(pubsub.Event[proto.Message]{Payload: proto.Message{
+		ID:        "sub-msg",
+		SessionID: subAgentSession,
+		Role:      proto.Assistant,
+		Parts:     []proto.ContentPart{proto.TextContent{Text: "sub-agent thinking"}},
+	}}, nil)
+	require.NoError(t, err)
+	require.False(t, done, "sub-agent message must not terminate the top-level run")
+	require.Equal(t, "sub-agent thinking", buf.String(),
+		"sub-agent output must stream to stdout when enabled")
+}
+
+// TestRunStream_SubAgentSuppressedWhenDisabled is the default behaviour:
+// without streamSubagents, sub-agent session output never reaches stdout.
+func TestRunStream_SubAgentSuppressedWhenDisabled(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	s := &runStream{
+		sessionID: "S",
+		runID:     "run-mine",
+		out:       buf,
+		read:      map[string]int{},
+		// streamSubagents defaults to false.
+	}
+
+	done, err := s.handle(pubsub.Event[proto.Message]{Payload: proto.Message{
+		ID:        "sub-msg",
+		SessionID: subAgentSession,
+		Role:      proto.Assistant,
+		Parts:     []proto.ContentPart{proto.TextContent{Text: "sub-agent thinking"}},
+	}}, nil)
+	require.NoError(t, err)
+	require.False(t, done)
+	require.Empty(t, buf.String(),
+		"sub-agent output must not reach stdout when streaming is disabled")
+}
+
+// TestRunStream_SubAgentDoesNotBreakParentSuppression ensures enabling
+// sub-agent streaming does not regress the parent-session suppression:
+// the top-level session's own live messages are still withheld when a
+// RunID correlator is set (reconciled from RunComplete instead).
+func TestRunStream_SubAgentDoesNotBreakParentSuppression(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	s := &runStream{
+		sessionID:       "S",
+		runID:           "run-mine",
+		out:             buf,
+		read:            map[string]int{},
+		streamSubagents: true,
+	}
+
+	// Parent session live message: still suppressed.
+	done, err := s.handle(pubsub.Event[proto.Message]{Payload: proto.Message{
+		ID:        "parent-live",
+		SessionID: "S",
+		Role:      proto.Assistant,
+		Parts:     []proto.ContentPart{proto.TextContent{Text: "parent prefix"}},
+	}}, nil)
+	require.NoError(t, err)
+	require.False(t, done)
+	require.Empty(t, buf.String(),
+		"parent live messages must stay suppressed even with sub-agent streaming on")
+
+	// The matching RunComplete reconciles the parent's final text.
+	done, err = s.handle(pubsub.Event[proto.RunComplete]{Payload: proto.RunComplete{
+		SessionID: "S",
+		RunID:     "run-mine",
+		MessageID: "parent-final",
+		Text:      "parent final answer",
+	}}, nil)
+	require.NoError(t, err)
+	require.True(t, done)
+	require.Equal(t, "parent final answer", buf.String())
+}
+
+// TestRunStream_SubAgentRunCompleteDoesNotExit guards the completion
+// filter: a sub-agent's own RunComplete (different RunID, child session)
+// must never terminate the top-level run, even with streaming enabled.
+func TestRunStream_SubAgentRunCompleteDoesNotExit(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	s := &runStream{
+		sessionID:       "S",
+		runID:           "run-mine",
+		out:             buf,
+		read:            map[string]int{},
+		streamSubagents: true,
+	}
+
+	done, err := s.handle(pubsub.Event[proto.RunComplete]{Payload: proto.RunComplete{
+		SessionID: subAgentSession,
+		RunID:     "run-sub",
+		MessageID: "sub-msg",
+		Text:      "sub-agent result",
+	}}, nil)
+	require.NoError(t, err)
+	require.False(t, done, "a sub-agent's RunComplete must not terminate the top-level run")
+	require.Empty(t, buf.String(),
+		"a sub-agent's RunComplete must not reconcile onto our stdout")
+}
+
+// TestRunStream_SubAgentPrefixesLabelWriterSwitches is the end-to-end
+// check that, with sub-agent streaming and a prefixer wired in, the
+// merged stdout stream is annotated: the parent's live output is
+// suppressed (RunID set), a sub-agent's output is labeled, and the
+// parent's reconciled final text returns under a "main" header.
+func TestRunStream_SubAgentPrefixesLabelWriterSwitches(t *testing.T) {
+	t.Parallel()
+
+	buf := &bytes.Buffer{}
+	s := &runStream{
+		sessionID:       "S",
+		runID:           "run-mine",
+		out:             buf,
+		read:            map[string]int{},
+		streamSubagents: true,
+		prefixer:        format.NewStreamPrefixer("S"),
+	}
+
+	// Sub-agent streams (parent's own messages stay suppressed under RunID).
+	_, err := s.handle(pubsub.Event[proto.Message]{Payload: proto.Message{
+		ID: "sub-msg", SessionID: subAgentSession, Role: proto.Assistant,
+		Parts: []proto.ContentPart{proto.TextContent{Text: "investigating"}},
+	}}, nil)
+	require.NoError(t, err)
+
+	// Parent's final text reconciled from RunComplete.
+	done, err := s.handle(pubsub.Event[proto.RunComplete]{Payload: proto.RunComplete{
+		SessionID: "S", RunID: "run-mine", MessageID: "final", Text: "all done",
+	}}, nil)
+	require.NoError(t, err)
+	require.True(t, done)
+	require.Equal(t, "[subagent tool-call-1]\ninvestigating\n[main]\nall done", buf.String())
 }
 
 // TestRunStream_NoRunIDFallsBackToSessionID preserves the older

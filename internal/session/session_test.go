@@ -10,6 +10,25 @@ import (
 
 func todo(status TodoStatus) Todo { return Todo{Content: "t", Status: status} }
 
+func TestIsAgentToolSessionID(t *testing.T) {
+	tests := []struct {
+		name string
+		id   string
+		want bool
+	}{
+		{"agent tool session", "msg-123$$tool-call-1", true},
+		{"plain session id", "regular-session-id", false},
+		{"empty string", "", false},
+		{"only separator", "$$", true},
+		{"too many separators", "a$$b$$c", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, IsAgentToolSessionID(tc.id))
+		})
+	}
+}
+
 func TestCompletedFraction(t *testing.T) {
 	tests := []struct {
 		name  string

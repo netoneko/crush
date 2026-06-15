@@ -256,10 +256,14 @@ func runNonInteractive(
 	}
 
 	stream := &runStream{
-		sessionID: sess.ID,
-		runID:     runID,
-		out:       os.Stdout,
-		read:      make(map[string]int),
+		sessionID:       sess.ID,
+		runID:           runID,
+		out:             os.Stdout,
+		read:            make(map[string]int),
+		streamSubagents: ws.Config.Options.StreamSubagentOutput,
+	}
+	if stream.streamSubagents {
+		stream.prefixer = format.NewStreamPrefixer(sess.ID)
 	}
 
 	defer func() {
@@ -317,6 +321,29 @@ type runStream struct {
 	out       io.Writer
 	read      map[string]int
 	printed   bool
+	// streamSubagents, when true, also streams the live assistant output of
+	// spawned sub-agents (the agent tool, which runs in child sessions) to
+	// stdout. The top-level session's own messages remain suppressed when a
+	// runID correlator is set (their final text is reconciled from
+	// RunComplete); sub-agent sessions have no RunComplete of ours, so they
+	// always stream live when this is enabled.
+	streamSubagents bool
+	// prefixer, when non-nil (set iff streamSubagents is on), emits a labeled
+	// header whenever the writing session changes, so interleaved top-level and
+	// sub-agent output on the merged stdout stream can be told apart.
+	prefixer *format.StreamPrefixer
+}
+
+// write emits part to stdout for the given session, prepending a per-agent
+// header when the writing session has changed. It centralizes the prefix logic
+// shared by the live-stream and RunComplete-reconciliation paths.
+func (s *runStream) write(sessionID, part string) {
+	if s.prefixer != nil {
+		if hdr := s.prefixer.Prefix(sessionID); hdr != "" {
+			fmt.Fprint(s.out, hdr)
+		}
+	}
+	fmt.Fprint(s.out, part)
 }
 
 // handle processes one SSE event. Returns done=true when the run
@@ -334,10 +361,19 @@ func (s *runStream) handle(ev any, stopSpinner func()) (done bool, err error) {
 	switch e := ev.(type) {
 	case pubsub.Event[proto.Message]:
 		msg := e.Payload
-		if msg.SessionID != s.sessionID || msg.Role != proto.Assistant || len(msg.Parts) == 0 {
+		if msg.Role != proto.Assistant || len(msg.Parts) == 0 {
 			return false, nil
 		}
-		if s.runID != "" {
+		isSubAgent := s.streamSubagents && session.IsAgentToolSessionID(msg.SessionID)
+		if msg.SessionID != s.sessionID && !isSubAgent {
+			return false, nil
+		}
+		// Our own session's live message events are suppressed when a RunID
+		// correlator is set: the final text is reconciled from RunComplete
+		// instead, so a queued turn finishing first on the same session can't
+		// contaminate stdout. Sub-agent sessions have no RunComplete of ours to
+		// reconcile against, so they stream live regardless of the correlator.
+		if !isSubAgent && s.runID != "" {
 			return false, nil
 		}
 		stop()
@@ -356,7 +392,7 @@ func (s *runStream) handle(ev any, stopSpinner func()) (done bool, err error) {
 		}
 		if s.printed || strings.TrimSpace(part) != "" {
 			s.printed = true
-			fmt.Fprint(s.out, part)
+			s.write(msg.SessionID, part)
 		}
 		s.read[msg.ID] = len(content)
 		return false, nil
@@ -402,7 +438,10 @@ func (s *runStream) handle(ev any, stopSpinner func()) (done bool, err error) {
 				}
 				if s.printed || strings.TrimSpace(tail) != "" {
 					s.printed = true
-					fmt.Fprint(s.out, tail)
+					// The reconciled tail is always the top-level turn's final
+					// text; route it through write so a "main" header is emitted
+					// if a sub-agent was the last thing on stdout.
+					s.write(s.sessionID, tail)
 				}
 			}
 		}

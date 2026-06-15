@@ -590,6 +590,11 @@
           "type": "boolean",
           "description": "Async: use the small model to compress the system prompt at session start. First turn uses the base prompt; later turns use the summarized version.",
           "default": false
+        },
+        "stream_subagent_output": {
+          "type": "boolean",
+          "description": "In non-interactive mode (crush run), stream the live output of spawned sub-agents (the agent tool) to stdout in addition to the top-level agent's output. Sub-agents run in child sessions whose output is otherwise surfaced only as a tool result.",
+          "default": false
         }
       },
       "additionalProperties": false,

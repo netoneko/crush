@@ -27,6 +27,7 @@ knob see [`TOOLING_IMPROVEMENTS_FOR_LOCAL_MODELS.md`](./TOOLING_IMPROVEMENTS_FOR
 | `compact_tools` | bool | `false` | Use short tool descriptions to save prompt tokens. |
 | `compact_prompt` | bool | `false` | Use a shorter system prompt (rules preserved, examples stripped). |
 | `summarize_prompt` | bool | `false` | Async: compress the system prompt with the small model at session start. |
+| `stream_subagent_output` | bool | `false` | In non-interactive mode (`crush run`), stream the live output of spawned sub-agents to stdout, not just the top-level agent's. |
 
 A representative local-model config:
 
@@ -231,6 +232,68 @@ models with context windows under ~64K.
 
 `compact_prompt` and `summarize_prompt` stack: compact is the static baseline,
 summarize compresses further at runtime.
+
+---
+
+## Streaming sub-agent output (`crush run`)
+
+When the coder delegates work via the `agent` tool, that sub-agent runs in its
+own *child session*. In the interactive TUI the child session is rendered on its
+own, but in non-interactive mode (`crush run`) the stdout streamer only follows
+the top-level session — so a sub-agent's reasoning and tool calls are invisible
+and only its final result surfaces, folded into the parent's next message.
+
+Set `stream_subagent_output: true` to also stream sub-agent assistant text to
+stdout as it is produced:
+
+```jsonc
+{
+  "$schema": "https://charm.land/crush.json",
+  "options": {
+    "stream_subagent_output": true
+  }
+}
+```
+
+Notes:
+
+- **Default is off** — behaviour is unchanged unless you opt in.
+- **Non-interactive only.** It has no effect in the interactive TUI, which
+  already renders child sessions.
+- **Works in both run paths** — the local in-process path
+  (`App.RunNonInteractive`) and the client/server path (`crush run` against a
+  running server). In the client/server path the top-level turn's own text is
+  still reconciled from the authoritative `RunComplete` event (so a queued turn
+  can't corrupt stdout); sub-agent sessions have no such correlator and stream
+  live.
+- **Completion is unaffected.** Only the message-rendering filter is widened.
+  The run still exits solely on the *top-level* turn's completion — a
+  sub-agent's own completion never terminates `crush run`.
+- **Labeled output.** Because everything is merged onto one stdout stream, each
+  switch between writers is annotated with a header on its own line —
+  `[subagent <id>]` for a spawned sub-agent (where `<id>` is its tool-call id,
+  which is stable per sub-agent and distinguishes parallel sub-agents) and
+  `[main]` when output returns to the top-level agent. The top-level agent's
+  *first* output is left unprefixed, so a run with no sub-agents is
+  byte-identical to the unannotated stream. Example:
+
+  ```text
+  Looking into the failing tests now.
+  [subagent toolu_01H…]
+  Found a nil deref in parser.go:42 …
+  [main]
+  Fixed it — the parser now guards the empty case.
+  ```
+
+  In the common case the parent is blocked on the tool call while one sub-agent
+  runs, so blocks don't overlap; with multiple *parallel* sub-agents their
+  chunks can still interleave, but each chunk is attributed by the preceding
+  header.
+
+Detection uses the agent-tool session-ID format (`messageID$$toolCallID`)
+produced by `session.CreateAgentToolSessionID` (see
+`session.IsAgentToolSessionID`); the labeling lives in
+`format.StreamPrefixer`.
 
 ---
 
