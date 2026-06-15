@@ -57,6 +57,80 @@ A representative local-model config:
 
 ---
 
+## Measured impact (and caveats)
+
+What the benchmark journal
+([`TOOLING_IMPROVEMENTS_FOR_LOCAL_MODELS.md`](./TOOLING_IMPROVEMENTS_FOR_LOCAL_MODELS.md)),
+the compression analysis
+([`TOOLING_IMPROVEMENTS_COMPACT_SYSTEM_PROMPT.md`](./TOOLING_IMPROVEMENTS_COMPACT_SYSTEM_PROMPT.md)),
+and the live field validation (the cost-anomaly-agent runbook) actually
+measured. Read this as "real but uneven" — several headline numbers shrink once
+measurement artifacts and run-to-run variance are separated out, and two options
+either didn't show up or backfired. **Every claim here is paired with its
+caveat on purpose.**
+
+### Headline trajectory
+
+Same task (`01_verify_apk_bootstrap`, qwen3-yolo) across configs:
+
+| Metric | no memory | memory fix | memory + tools |
+|---|---|---|---|
+| Session duration | 18.2 min | 8.1 min | ~7 min |
+| Total tool calls | 92 | 46 | **27** |
+| Avg response time | 18.8 s | 14.0 s | **6.4 s** |
+| Max response time | 175.9 s | 48.8 s | **32 s** |
+| Total LLM time | ~772 s | ~238 s | **192 s** |
+| Peak prompt | ~71K tok | ~62K tok | **22K tok** |
+
+> **Caveats on the table.** (1) The first big jump (col 1→2) happened *with memory
+> inactive in both runs* — it was the model being more direct that session, i.e.
+> run-to-run variance, not the optimization. (2) An earlier ~46K→12K *starting*-prompt
+> "drop" was a **tokenizer measurement artifact** (an older Ollama counted tool
+> schemas differently); the real baseline is ~12K and all runs are comparable at
+> that size. The durable, attributable wins are the tool-call / latency reductions
+> and the low peak context — real, but smaller than the raw 3–4× the table implies.
+
+### Per-optimization
+
+| Optimization | Measured effect | Caveat |
+|---|---|---|
+| **Memory offload** | Reached **85,391 tokens — ~22K past the baseline parse-failure point** — with no malformed output. The primary correctness win. | `memory_scroll` re-inflates context (40 calls in one run); the wrap is **line-based**, so single-line JSON (e.g. a 73 KB `query_costs` row, `Lines: 1`) trims nothing — in production one call jumped the prompt ~60K→135K tokens in one step. Many sub-threshold results also sum into a spike. ~930-token system-prompt overhead. |
+| **`compact_tools`** | Starting prompt **12,197 → 10,343 tokens (−15%)**, stable across 3 runs, no behavior regression. The cleanest repeatable win. | Honored by the patched/dev build only — **not** stock brew v0.71.0, so the lower floor isn't portable. |
+| **`compact_prompt`** | Expected ~3,900-token saving. | **Observed ~20 tokens at turn 1** — template savings swamped by injected `context_paths` content. Peak was ~2,800 tokens lower, but only indirectly. Effectively inconclusive as measured. |
+| **`summarize_prompt`** | 83–96% **byte** reduction of the static prompt (16,297 B → ~2,652 B at 84%). | **Actively risky over-applied:** at 84–96% the 4B model dropped the live `<memory>`/`<env>`/`<skills>` blocks and sessions wrote *no file at all*. A small model can't tell live runtime data from boilerplate. Safe form = compress only static rules, append live blocks unmodified. |
+| **Task self-assessment + seeded todos** | Cut filesystem search to **≤1/leg vs 20+** in the baseline; reliable completion. | Structure *without depth* invited **premature closure** — a todos-only run closed an anomaly early and missed the real peak; needed a mandatory drill-down subtask to fix. |
+| **Mid-run self-assessment (spiral breaker)** | A leg came in at **38 msgs / 20 tool calls vs a 61-msg baseline**, still correct. | Early false positive: `todos` updates tripped the nudge at `repeat_threshold:4` — now excluded from the spiral count (doc-default `5` also wouldn't trip). The nudge is **persisted** to history (earlier docs wrongly called it transient). |
+
+### Field validation (cost-anomaly agent)
+
+End-to-end task with ground truth, most recent evidence:
+
+- **Capability jump:** from *"loops forever, fills the context window, never writes
+  a report"* → *"produces ground-truth-accurate single-anomaly reports reliably"* —
+  estimated **~60–70% of the way to a usable agent**.
+- **Leaner/faster:** the patched build did **24 tool calls / 14.9 min** for a better
+  report vs **38 calls / 29.3 min** for stock — but the comparison is **confounded**
+  (the patched build also inherited experimental global config), so it isn't a clean
+  binary-only delta.
+
+> **Standing ceilings the field doc names.** (1) **Cumulative** context overflow is
+> the new limit — a thorough run peaked **153,667 tokens over the 131,072 `num_ctx`**;
+> the per-payload caps don't stop history growth. (2) `crush.json`'s
+> `context_window` is **ignored** when Ollama's model cap is lower (262k configured,
+> 131k effective). (3) Per-model `default_max_tokens` wasn't applied on the run path
+> (effective ~2048 cap truncated reports). (4) Small models (qwen3:4b) **collapse
+> agentic tasks into Q&A** — workers "answer the path" instead of calling the tool —
+> so the agent effectively *requires* the large model. (5) A full multi-anomaly
+> end-to-end synthesis has **never completed cleanly**.
+
+The throughline: memory (parse-error elimination) and `compact_tools` (−15%, leaner)
+are the clean wins; the self-assessment / spiral features show concrete tool-call
+and message reductions; `compact_prompt`/`summarize_prompt` are marginal or risky as
+measured. The biggest *capability* change isn't one knob — it's the combination
+moving a run from "never finishes" to "finishes correctly and reliably."
+
+---
+
 ## Task self-assessment (autonomous todo tracking)
 
 **Problem.** Small models routinely declare victory with todos still open: they
