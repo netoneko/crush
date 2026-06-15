@@ -47,6 +47,21 @@ func HasIncompleteTodos(todos []Todo) bool {
 	return false
 }
 
+// CompletedFraction returns the fraction of todos marked completed, in the
+// range [0,1]. An empty list returns 1.0 — there is nothing left to close out.
+func CompletedFraction(todos []Todo) float64 {
+	if len(todos) == 0 {
+		return 1.0
+	}
+	completed := 0
+	for _, todo := range todos {
+		if todo.Status == TodoStatusCompleted {
+			completed++
+		}
+	}
+	return float64(completed) / float64(len(todos))
+}
+
 type Session struct {
 	ID               string
 	ParentSessionID  string

@@ -476,6 +476,8 @@ Proper markdown structure, correct PASS verdict, but contains `"port 4cap4444"` 
 
 **Fix:** After the model produces what looks like a terminal action (file write, report creation), inject a self-assessment prompt: "Review the output you just produced against the task requirements. Does it fully satisfy the spec? If not, fix it." This should be a configurable step (`enable_task_verification: true`) so it can be disabled for models that handle it poorly or for non-interactive runs where latency matters.
 
+**Status: implemented** as `enable_task_self_assessment` (todo-driven, not output-diff-driven): after a successful run with incomplete todos, Crush injects a reminder listing the open tasks by name and asks the model to close them. It is now configurable to **loop** until the work is done — see the `task_self_assessment` `{ max_reminders, target_completion }` block documented in [`TOOL_OPTIMIZATIONS.md`](./TOOL_OPTIMIZATIONS.md#task-self-assessment-autonomous-todo-tracking).
+
 ---
 
 ## 8. Parse error retry is silent and unconfigurable

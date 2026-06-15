@@ -4,8 +4,30 @@ import (
 	"testing"
 
 	"github.com/charmbracelet/crush/internal/db"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func todo(status TodoStatus) Todo { return Todo{Content: "t", Status: status} }
+
+func TestCompletedFraction(t *testing.T) {
+	tests := []struct {
+		name  string
+		todos []Todo
+		want  float64
+	}{
+		{"empty list is fully complete", nil, 1.0},
+		{"all completed", []Todo{todo(TodoStatusCompleted), todo(TodoStatusCompleted)}, 1.0},
+		{"none completed", []Todo{todo(TodoStatusPending), todo(TodoStatusInProgress)}, 0.0},
+		{"half completed", []Todo{todo(TodoStatusCompleted), todo(TodoStatusPending)}, 0.5},
+		{"in_progress counts as incomplete", []Todo{todo(TodoStatusCompleted), todo(TodoStatusInProgress)}, 0.5},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.InDelta(t, tc.want, CompletedFraction(tc.todos), 1e-9)
+		})
+	}
+}
 
 func TestEstimatedUsageStateSurvivesFetchModifySave(t *testing.T) {
 	dataDir := t.TempDir()

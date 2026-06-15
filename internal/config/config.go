@@ -298,6 +298,12 @@ type Options struct {
 	// tasks that were actually finished and to complete any that are genuinely
 	// unfinished. Disabled by default.
 	EnableTaskSelfAssessment *bool `json:"enable_task_self_assessment,omitempty" jsonschema:"description=After a run that ends with incomplete todos\\, inject a follow-up prompt asking the model to verify and close out finished tasks and complete any that are genuinely unfinished.,default=false"`
+	// TaskSelfAssessment tunes the follow-up reminders sent when
+	// enable_task_self_assessment is on. When unset, a single reminder is sent
+	// (the historical behavior). Set max_reminders higher to keep re-prompting
+	// until every task is closed, and target_completion to stop early once a
+	// fraction of todos are done.
+	TaskSelfAssessment *TaskSelfAssessmentConfig `json:"task_self_assessment,omitempty" jsonschema:"description=Tuning for the task self-assessment reminders (requires enable_task_self_assessment). Controls how many reminders to send and when to stop."`
 	// CompactTools replaces verbose tool descriptions with shorter versions to
 	// reduce prompt token usage. Useful for local models with smaller context
 	// windows. Affects memory_scroll, memory_list, memory_grep, file_write,
@@ -314,6 +320,22 @@ type Options struct {
 	// version. A log line is emitted when the summarization completes. Requires
 	// the small model to be configured.
 	SummarizePrompt bool `json:"summarize_prompt,omitempty" jsonschema:"description=Async: use the small model to compress the system prompt at session start. First turn uses the base prompt; later turns use the summarized version.,default=false"`
+}
+
+// TaskSelfAssessmentConfig tunes the follow-up reminders Crush injects when
+// enable_task_self_assessment is on and a run ends with incomplete todos.
+//
+// Reminders stop as soon as the completion target is reached or the cap is
+// hit, whichever comes first, so MaxReminders always bounds the worst case.
+type TaskSelfAssessmentConfig struct {
+	// MaxReminders is the maximum number of follow-up reminders to send while
+	// todos remain incomplete. Values < 1 fall back to the default of 1.
+	// Raise it to keep re-prompting the model until every task is closed.
+	MaxReminders int `json:"max_reminders,omitempty" jsonschema:"description=Maximum number of follow-up reminders to send while todos remain incomplete. Raise it to keep re-prompting until all tasks are closed.,default=1"`
+	// TargetCompletion stops reminders once this fraction (0-1] of todos are
+	// completed. Values <= 0 or > 1 fall back to the default of 1.0 (every
+	// task must be closed before reminders stop).
+	TargetCompletion float64 `json:"target_completion,omitempty" jsonschema:"description=Stop sending reminders once this fraction (0-1) of todos are completed. Defaults to 1.0 (all tasks).,default=1"`
 }
 
 type MCPs map[string]MCPConfig

@@ -450,6 +450,18 @@
           "type": "array",
           "description": "List of built-in tools to disable and hide from the agent"
         },
+        "task_tools": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "view",
+              "write",
+              "mcp"
+            ]
+          },
+          "type": "array",
+          "description": "Tools the spawned Task (sub-)agent may call. Built-in tool names plus the special token 'mcp' (grants all MCP tools). Defaults to the read-only set (glob/grep/ls/sourcegraph/view) with no MCP when unset. Disabled tools are still excluded."
+        },
         "disable_provider_auto_update": {
           "type": "boolean",
           "description": "Disable providers auto-update",
@@ -467,6 +479,11 @@
         "disable_metrics": {
           "type": "boolean",
           "description": "Disable sending metrics",
+          "default": false
+        },
+        "disable_update_check": {
+          "type": "boolean",
+          "description": "Disable the startup check for new Crush versions",
           "default": false
         },
         "initialize_as": {
@@ -516,6 +533,54 @@
           },
           "type": "array",
           "description": "List of skill names to disable and hide from the agent"
+        },
+        "enable_memory": {
+          "type": "boolean",
+          "description": "Store large tool results in memory for later retrieval via memory_list and memory_scroll. Enabled by default.",
+          "default": true
+        },
+        "memory_hard_limit_bytes": {
+          "type": "integer",
+          "description": "Byte length above which tool results are stored in memory (default 8192)"
+        },
+        "memory_overspill": {
+          "type": "number",
+          "description": "Fraction of the hard limit tolerated inline before storing — e.g. 0.20 means up to hard_limit*1.20 is kept inline (default 0.20)"
+        },
+        "memory_preview_lines": {
+          "type": "integer",
+          "description": "Lines shown in the inline reference summary returned to the model (default 10)"
+        },
+        "memory_refuse_tools": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Tool names that reject oversized results instead of storing them. The model is told to re-call with narrower parameters (e.g. view with offset/limit)."
+        },
+        "enable_task_self_assessment": {
+          "type": "boolean",
+          "description": "After a run that ends with incomplete todos, inject a follow-up prompt asking the model to verify and close out finished tasks and complete any that are genuinely unfinished.",
+          "default": false
+        },
+        "task_self_assessment": {
+          "$ref": "#/$defs/TaskSelfAssessmentConfig",
+          "description": "Tuning for the task self-assessment reminders (requires enable_task_self_assessment). Controls how many reminders to send and when to stop."
+        },
+        "compact_tools": {
+          "type": "boolean",
+          "description": "Use shorter tool descriptions to reduce prompt token usage. Useful for local/small-context models.",
+          "default": false
+        },
+        "compact_prompt": {
+          "type": "boolean",
+          "description": "Use a shorter system prompt to reduce token usage. Recommended for local/small-context models.",
+          "default": false
+        },
+        "summarize_prompt": {
+          "type": "boolean",
+          "description": "Async: use the small model to compress the system prompt at session start. First turn uses the base prompt; later turns use the summarized version.",
+          "default": false
         }
       },
       "additionalProperties": false,
@@ -727,6 +792,22 @@
           "type": "boolean",
           "description": "Enable transparent background for the TUI interface",
           "default": false
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "TaskSelfAssessmentConfig": {
+      "properties": {
+        "max_reminders": {
+          "type": "integer",
+          "description": "Maximum number of follow-up reminders to send while todos remain incomplete. Raise it to keep re-prompting until all tasks are closed.",
+          "default": 1
+        },
+        "target_completion": {
+          "type": "number",
+          "description": "Stop sending reminders once this fraction (0-1) of todos are completed. Defaults to 1.0 (all tasks).",
+          "default": 1
         }
       },
       "additionalProperties": false,

@@ -1,5 +1,12 @@
 {
   "$schema": "https://charm.land/crush.json",
+  "options": {
+    "enable_task_self_assessment": true,
+    "task_self_assessment": {
+      "max_reminders": 5,
+      "target_completion": 1.0
+    }
+  },
   "lsp": {
     "gopls": {
       "options": {

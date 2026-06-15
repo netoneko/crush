@@ -301,24 +301,75 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 	}
 
 	if originalErr == nil && c.taskSelfAssessmentEnabled() {
-		if assessPrompt, ok := c.buildTaskAssessmentPrompt(ctx, sessionID); ok {
-			_, _ = c.currentAgent.Run(ctx, SessionAgentCall{
-				SessionID:        sessionID,
-				RunID:            runID,
-				Prompt:           assessPrompt,
-				MaxOutputTokens:  maxTokens,
-				ProviderOptions:  mergedOptions,
-				Temperature:      temp,
-				TopP:             topP,
-				TopK:             topK,
-				FrequencyPenalty: freqPenalty,
-				PresencePenalty:  presPenalty,
-				OnComplete:       onComplete,
-			})
-		}
+		c.runTaskSelfAssessment(ctx, c.currentAgent, SessionAgentCall{
+			SessionID:        sessionID,
+			RunID:            runID,
+			MaxOutputTokens:  maxTokens,
+			ProviderOptions:  mergedOptions,
+			Temperature:      temp,
+			TopP:             topP,
+			TopK:             topK,
+			FrequencyPenalty: freqPenalty,
+			PresencePenalty:  presPenalty,
+			OnComplete:       onComplete,
+		})
 	}
 
 	return result, originalErr
+}
+
+// runTaskSelfAssessment re-prompts the agent to close out incomplete todos.
+// It re-fetches the session's todos between reminders and keeps prompting
+// until the configured completion target is reached, no incomplete todos
+// remain, or the max-reminders cap is hit — whichever comes first. The cap
+// is the loop guard: it bounds the worst case even if the model never
+// closes its tasks. The base call carries the per-run model settings; only
+// the prompt varies per reminder. Returns the number of reminders sent.
+func (c *coordinator) runTaskSelfAssessment(ctx context.Context, agent SessionAgent, base SessionAgentCall) int {
+	var cfg *config.TaskSelfAssessmentConfig
+	if opts := c.cfg.Config().Options; opts != nil {
+		cfg = opts.TaskSelfAssessment
+	}
+	maxReminders, target := resolveTaskAssessmentSettings(cfg)
+
+	sent := 0
+	for sent < maxReminders {
+		sess, err := c.sessions.Get(ctx, base.SessionID)
+		if err != nil {
+			return sent
+		}
+		if session.CompletedFraction(sess.Todos) >= target {
+			return sent
+		}
+		assessPrompt, ok := buildTaskAssessmentPrompt(sess.Todos)
+		if !ok {
+			return sent
+		}
+		call := base
+		call.Prompt = assessPrompt
+		if _, err := agent.Run(ctx, call); err != nil {
+			return sent
+		}
+		sent++
+	}
+	return sent
+}
+
+// resolveTaskAssessmentSettings applies defaults to the optional tuning
+// config. Without config (or with out-of-range values) it yields the
+// historical behavior: a single reminder, requiring every task to close.
+func resolveTaskAssessmentSettings(cfg *config.TaskSelfAssessmentConfig) (maxReminders int, target float64) {
+	maxReminders, target = 1, 1.0
+	if cfg == nil {
+		return maxReminders, target
+	}
+	if cfg.MaxReminders >= 1 {
+		maxReminders = cfg.MaxReminders
+	}
+	if cfg.TargetCompletion > 0 && cfg.TargetCompletion <= 1 {
+		target = cfg.TargetCompletion
+	}
+	return maxReminders, target
 }
 
 func (c *coordinator) taskSelfAssessmentEnabled() bool {
@@ -326,30 +377,37 @@ func (c *coordinator) taskSelfAssessmentEnabled() bool {
 	return opts != nil && opts.EnableTaskSelfAssessment != nil && *opts.EnableTaskSelfAssessment
 }
 
-// buildTaskAssessmentPrompt returns a self-assessment prompt when the session
-// has incomplete todos, and false when all todos are already complete or there
-// are no todos at all.
+// buildTaskAssessmentPrompt returns a self-assessment prompt when the todo
+// list has incomplete entries, and false when all todos are already complete
+// or the list is empty.
 //
 // The full todo list (including already-completed tasks) is included so the
 // model can submit a correct full replacement via the todos tool without
-// accidentally clobbering completed entries.
-func (c *coordinator) buildTaskAssessmentPrompt(ctx context.Context, sessionID string) (string, bool) {
-	sess, err := c.sessions.Get(ctx, sessionID)
-	if err != nil || len(sess.Todos) == 0 {
-		return "", false
-	}
-	if !session.HasIncompleteTodos(sess.Todos) {
+// accidentally clobbering completed entries. Unfinished tasks are also called
+// out by name so the reminder is explicit about what is left to do.
+func buildTaskAssessmentPrompt(todos []session.Todo) (string, bool) {
+	if len(todos) == 0 || !session.HasIncompleteTodos(todos) {
 		return "", false
 	}
 
-	p := "Current task list:\n"
-	for _, t := range sess.Todos {
-		p += fmt.Sprintf("- [%s] %s\n", t.Status, t.Content)
+	var sb strings.Builder
+	sb.WriteString("Current task list:\n")
+	var unfinished []string
+	for _, t := range todos {
+		fmt.Fprintf(&sb, "- [%s] %s\n", t.Status, t.Content)
+		if t.Status != session.TodoStatusCompleted {
+			unfinished = append(unfinished, t.Content)
+		}
 	}
-	p += "\nSome tasks are still marked as unfinished. Assess each one: if the work was already " +
-		"completed this session, mark it completed. If work is genuinely unfinished, complete it " +
-		"now. Use the todos tool to submit the updated full list."
-	return p, true
+
+	sb.WriteString("\nStill unfinished:\n")
+	for _, name := range unfinished {
+		fmt.Fprintf(&sb, "- %s\n", name)
+	}
+	sb.WriteString("\nAssess each unfinished task: if the work was already completed this session, " +
+		"mark it completed. If work is genuinely unfinished, complete it now. Use the todos tool to " +
+		"submit the updated full list.")
+	return sb.String(), true
 }
 
 func getProviderOptions(model Model, providerCfg config.ProviderConfig) fantasy.ProviderOptions {
