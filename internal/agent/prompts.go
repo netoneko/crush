@@ -36,6 +36,22 @@ func coderCompactPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
 	return systemPrompt, nil
 }
 
+// resolveSubagentPromptPaths returns the prompt files the spawned Task sub-agent
+// should use, or nil to fall back to the built-in task template. The sub-agent's
+// own subagent_prompt_paths wins; when it is unset, the sub-agent inherits the
+// coder's prompt_paths so an execution-engine override applies end-to-end without
+// having to repeat it. Set subagent_prompt_paths to give the sub-agent a
+// different prompt from the coder.
+func resolveSubagentPromptPaths(o *config.Options) []string {
+	if o == nil {
+		return nil
+	}
+	if len(o.SubagentPromptPaths) > 0 {
+		return o.SubagentPromptPaths
+	}
+	return o.PromptPaths
+}
+
 // promptFromFiles builds a system prompt from a user-supplied set of files
 // (concatenated in order) instead of the built-in template. The result is still
 // rendered as a Go text/template, and the auto-discovered context files are

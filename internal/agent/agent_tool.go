@@ -28,12 +28,12 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 	if !ok {
 		return nil, errors.New("task agent not configured")
 	}
-	// subagent_prompt_paths fully overrides the sub-agent prompt, independent of
-	// the coder's prompt_paths; otherwise the built-in task template is used.
+	// Resolve the sub-agent prompt: subagent_prompt_paths wins, else it inherits
+	// the coder's prompt_paths, else the built-in task template.
 	promptFn := taskPrompt
-	if o := c.cfg.Config().Options; o != nil && len(o.SubagentPromptPaths) > 0 {
+	if paths := resolveSubagentPromptPaths(c.cfg.Config().Options); len(paths) > 0 {
 		promptFn = func(po ...prompt.Option) (*prompt.Prompt, error) {
-			return promptFromFiles("task", o.SubagentPromptPaths, c.cfg, po...)
+			return promptFromFiles("task", paths, c.cfg, po...)
 		}
 	}
 	sysPrompt, err := promptFn(prompt.WithWorkingDir(c.cfg.WorkingDir()))

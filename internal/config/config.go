@@ -352,17 +352,20 @@ type Options struct {
 	// (CLAUDE.md, CRUSH.md, AGENTS.md, …) are NOT appended — the injected files
 	// are the whole prompt. Relative paths resolve against the working directory;
 	// ~ and $VARs are expanded. A missing/unreadable file is a hard error.
-	// Takes precedence over compact_prompt. Useful for running crush as an
-	// execution engine with a fully custom prompt.
-	PromptPaths []string `json:"prompt_paths,omitempty" jsonschema:"description=Files concatenated (in order) to fully override the coder system prompt. Rendered as a Go text/template (can use {{.WorkingDir}}\\, {{.GitStatus}}\\, {{range .ContextFiles}}). Suppresses auto-discovered context files. Overrides compact_prompt.,example=prompts/base.md,example=prompts/rules.md"`
+	// Takes precedence over compact_prompt. Also inherited by the spawned Task
+	// sub-agent when subagent_prompt_paths is unset (see SubagentPromptPaths).
+	// Useful for running crush as an execution engine with a fully custom prompt.
+	PromptPaths []string `json:"prompt_paths,omitempty" jsonschema:"description=Files concatenated (in order) to fully override the coder system prompt. Rendered as a Go text/template (can use {{.WorkingDir}}\\, {{.GitStatus}}\\, {{range .ContextFiles}}). Suppresses auto-discovered context files. Overrides compact_prompt. The sub-agent inherits this unless subagent_prompt_paths is set.,example=prompts/base.md,example=prompts/rules.md"`
 	// SubagentPromptPaths is the sub-agent counterpart of PromptPaths: when set,
 	// the listed files are concatenated (in order) and used as the spawned Task
 	// sub-agent's prompt template instead of the built-in task prompt. Same
 	// semantics as PromptPaths (rendered as a Go text/template, auto-discovered
 	// context files suppressed, relative paths resolve against the working dir,
-	// missing file = hard error). Independent of PromptPaths — the coder and the
-	// sub-agent are configured separately; neither inherits the other's override.
-	SubagentPromptPaths []string `json:"subagent_prompt_paths,omitempty" jsonschema:"description=Files concatenated (in order) to fully override the spawned Task sub-agent's system prompt. Same semantics as prompt_paths but applies only to the sub-agent. Independent of prompt_paths.,example=prompts/subagent.md"`
+	// missing file = hard error). When this is unset the sub-agent inherits
+	// PromptPaths; set it only to give the sub-agent a prompt that differs from
+	// the coder's. The effective resolution is: subagent_prompt_paths → prompt_paths
+	// → built-in task template.
+	SubagentPromptPaths []string `json:"subagent_prompt_paths,omitempty" jsonschema:"description=Files concatenated (in order) to fully override the spawned Task sub-agent's system prompt. Same semantics as prompt_paths but applies only to the sub-agent. When unset the sub-agent inherits prompt_paths; set this only to diverge from the coder.,example=prompts/subagent.md"`
 	// SummarizePrompt runs an async bootstrap step at session start that uses
 	// the small model to further compress the system prompt. The first turn uses
 	// the base prompt (full or compact); subsequent turns use the summarized
