@@ -57,6 +57,7 @@ func (c *coordinator) agentTool(ctx context.Context) (fantasy.AgentTool, error) 
 
 			return c.runSubAgent(ctx, subAgentParams{
 				Agent:          agent,
+				AgentCfg:       agentCfg,
 				SessionID:      sessionID,
 				AgentMessageID: agentMessageID,
 				ToolCallID:     call.ID,

@@ -15,8 +15,10 @@ knob see [`TOOLING_IMPROVEMENTS_FOR_LOCAL_MODELS.md`](./TOOLING_IMPROVEMENTS_FOR
 
 | Option | Type | Default | Purpose |
 |--------|------|---------|---------|
-| `enable_task_self_assessment` | bool | `false` | After a run that ends with open todos, re-prompt the model to finish/close them. |
+| `enable_task_self_assessment` | bool | `false` | After a run that ends with open todos, re-prompt the model to finish/close them. Applies to the top-level coder and (unless overridden) the spawned Task sub-agent. |
 | `task_self_assessment` | object | — | Tuning for the reminders above (loop count + completion target). |
+| `subagent_enable_task_self_assessment` | bool | — | Override `enable_task_self_assessment` for the spawned Task sub-agent only. Unset = inherit the global value. |
+| `subagent_task_self_assessment` | object | — | Override `task_self_assessment` tuning for the spawned Task sub-agent only. Unset = inherit the global tuning. |
 | `enable_memory` | bool | `true` | Spill oversized tool results into a queryable memory store instead of the prompt. |
 | `memory_hard_limit_bytes` | int | `8192` | Byte threshold above which a tool result is stored in memory. |
 | `memory_overspill` | float | `0.20` | Slack fraction kept inline before spilling (e.g. `0.20` → up to `hard_limit*1.2`). |
@@ -117,6 +119,37 @@ Because the cap is checked first, `max_reminders` is always an upper bound on
 extra turns — there is no runaway. The reminders reuse the same model settings
 (max tokens, temperature, provider options) as the originating run.
 
+### Sub-agent self-assessment
+
+Self-assessment also runs for the spawned **Task sub-agent** (the `agent` tool
+the coder delegates to), not just the top-level run. After a sub-agent's run
+finishes, Crush inspects *that sub-session's* todos and loops the same way,
+before propagating the sub-agent's cost back to the parent.
+
+By default the sub-agent **inherits the global setting** — no extra config is
+needed. Set `enable_task_self_assessment: true` and both the coder and the
+sub-agent get reminders. The `subagent_*` keys exist only to configure the
+sub-agent *differently* from the coder:
+
+```jsonc
+"options": {
+  "enable_task_self_assessment": true,        // coder: on
+  "task_self_assessment": { "max_reminders": 5 },
+
+  "subagent_enable_task_self_assessment": false  // sub-agent: off (override)
+}
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `subagent_enable_task_self_assessment` | inherit | `true`/`false` overrides the on/off switch for the sub-agent only. Unset = use `enable_task_self_assessment`. |
+| `subagent_task_self_assessment` | inherit | Overrides the `{ max_reminders, target_completion }` tuning for the sub-agent only. Unset = use the global `task_self_assessment`. |
+
+Resolution order for the sub-agent is **`subagent_*` override → global value →
+built-in default**. The override is a per-agent value carried on the Task
+agent's config; the coder agent never carries one, so it always resolves
+directly against the global options.
+
 ### Cost note
 
 Each reminder is a full model turn. On hosted/metered models this multiplies
@@ -127,13 +160,23 @@ useful for local models where turns are effectively free and the failure mode
 ### Where it lives (for maintainers)
 
 - `internal/config/config.go` — `Options.EnableTaskSelfAssessment`,
-  `Options.TaskSelfAssessment`, and the `TaskSelfAssessmentConfig` type.
+  `Options.TaskSelfAssessment`, the per-sub-agent
+  `Options.SubagentEnableTaskSelfAssessment` /
+  `Options.SubagentTaskSelfAssessment` overrides, and the
+  `TaskSelfAssessmentConfig` type. The per-agent override fields
+  (`Agent.EnableTaskSelfAssessment` / `Agent.TaskSelfAssessment`) are populated
+  for the Task agent in `SetupAgents`. Note `Config.Agents` is `json:"-"` and
+  rebuilt by `SetupAgents` on every load — user config reaches the agents only
+  through `Options`, which is why the sub-agent knobs live there.
 - `internal/agent/coordinator.go` — `runTaskSelfAssessment` (the loop),
-  `resolveTaskAssessmentSettings` (defaults), and `buildTaskAssessmentPrompt`
-  (the reminder text). The loop is invoked from `coordinator.Run` after a
-  successful run.
+  `taskSelfAssessmentEnabled` / `taskAssessmentConfig` (per-agent resolution
+  with global fallback), `resolveTaskAssessmentSettings` (defaults), and
+  `buildTaskAssessmentPrompt` (the reminder text). The loop is invoked from
+  `coordinator.Run` (top-level, coder config) and from `runSubAgent`
+  (sub-agent, Task config) after a successful run.
 - `internal/session/session.go` — `CompletedFraction` / `HasIncompleteTodos`.
-- Tests: `internal/agent/coordinator_test.go`,
+- Tests: `internal/agent/coordinator_test.go` (resolution + sub-agent loop),
+  `internal/config/agent_id_test.go` (SetupAgents wiring),
   `internal/session/session_test.go`.
 
 ---

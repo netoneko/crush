@@ -500,7 +500,7 @@ func TestRunTaskSelfAssessment(t *testing.T) {
 		var prompts []string
 		agent := newMockAgent("p", 4096, completeOneTodoPerCall(t, env.sessions, &prompts))
 
-		sent := coord.runTaskSelfAssessment(t.Context(), agent, SessionAgentCall{SessionID: sess.ID})
+		sent := coord.runTaskSelfAssessment(t.Context(), agent, config.Agent{}, SessionAgentCall{SessionID: sess.ID})
 		assert.Equal(t, 3, sent, "one reminder per incomplete task")
 		assert.Len(t, prompts, 3)
 		assert.Contains(t, prompts[0], "task-0")
@@ -518,7 +518,7 @@ func TestRunTaskSelfAssessment(t *testing.T) {
 		var prompts []string
 		agent := newMockAgent("p", 4096, completeOneTodoPerCall(t, env.sessions, &prompts))
 
-		sent := coord.runTaskSelfAssessment(t.Context(), agent, SessionAgentCall{SessionID: sess.ID})
+		sent := coord.runTaskSelfAssessment(t.Context(), agent, config.Agent{}, SessionAgentCall{SessionID: sess.ID})
 		assert.Equal(t, 2, sent)
 
 		final, err := env.sessions.Get(t.Context(), sess.ID)
@@ -534,7 +534,7 @@ func TestRunTaskSelfAssessment(t *testing.T) {
 		var prompts []string
 		agent := newMockAgent("p", 4096, completeOneTodoPerCall(t, env.sessions, &prompts))
 
-		sent := coord.runTaskSelfAssessment(t.Context(), agent, SessionAgentCall{SessionID: sess.ID})
+		sent := coord.runTaskSelfAssessment(t.Context(), agent, config.Agent{}, SessionAgentCall{SessionID: sess.ID})
 		assert.Equal(t, 2, sent, "stops when 2/4 = 0.5 of tasks are done")
 	})
 
@@ -552,7 +552,7 @@ func TestRunTaskSelfAssessment(t *testing.T) {
 			return nil, nil
 		})
 
-		sent := coord.runTaskSelfAssessment(t.Context(), agent, SessionAgentCall{SessionID: sess.ID})
+		sent := coord.runTaskSelfAssessment(t.Context(), agent, config.Agent{}, SessionAgentCall{SessionID: sess.ID})
 		assert.Equal(t, 0, sent)
 	})
 
@@ -564,7 +564,7 @@ func TestRunTaskSelfAssessment(t *testing.T) {
 		var prompts []string
 		agent := newMockAgent("p", 4096, completeOneTodoPerCall(t, env.sessions, &prompts))
 
-		sent := coord.runTaskSelfAssessment(t.Context(), agent, SessionAgentCall{SessionID: sess.ID})
+		sent := coord.runTaskSelfAssessment(t.Context(), agent, config.Agent{}, SessionAgentCall{SessionID: sess.ID})
 		assert.Equal(t, 1, sent, "historical one-shot behavior without tuning config")
 	})
 
@@ -579,9 +579,199 @@ func TestRunTaskSelfAssessment(t *testing.T) {
 			return nil, errors.New("provider boom")
 		})
 
-		sent := coord.runTaskSelfAssessment(t.Context(), agent, SessionAgentCall{SessionID: sess.ID})
+		sent := coord.runTaskSelfAssessment(t.Context(), agent, config.Agent{}, SessionAgentCall{SessionID: sess.ID})
 		assert.Equal(t, 0, sent, "a failed reminder is not counted")
 		assert.Equal(t, 1, calls, "loop aborts after the first failure")
+	})
+}
+
+func boolPtr(b bool) *bool { return &b }
+
+func coordWithGlobalSelfAssessment(t *testing.T, env fakeEnv, enabled *bool, cfg *config.TaskSelfAssessmentConfig) *coordinator {
+	t.Helper()
+	conf, err := config.Init(env.workingDir, "", false)
+	require.NoError(t, err)
+	conf.Config().Options.EnableTaskSelfAssessment = enabled
+	conf.Config().Options.TaskSelfAssessment = cfg
+	return &coordinator{cfg: conf, sessions: env.sessions}
+}
+
+func TestTaskSelfAssessmentEnabled(t *testing.T) {
+	tests := []struct {
+		name     string
+		global   *bool
+		perAgent *bool
+		want     bool
+	}{
+		{"both unset defaults off", nil, nil, false},
+		{"global on, agent inherits", boolPtr(true), nil, true},
+		{"global off, agent inherits", boolPtr(false), nil, false},
+		{"agent override on beats unset global", nil, boolPtr(true), true},
+		{"agent override on beats global off", boolPtr(false), boolPtr(true), true},
+		{"agent override off beats global on", boolPtr(true), boolPtr(false), false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := testEnv(t)
+			coord := coordWithGlobalSelfAssessment(t, env, tc.global, nil)
+			got := coord.taskSelfAssessmentEnabled(config.Agent{EnableTaskSelfAssessment: tc.perAgent})
+			assert.Equal(t, tc.want, got)
+		})
+	}
+}
+
+func TestTaskAssessmentConfig(t *testing.T) {
+	global := &config.TaskSelfAssessmentConfig{MaxReminders: 2}
+	perAgent := &config.TaskSelfAssessmentConfig{MaxReminders: 7}
+
+	t.Run("per-agent tuning overrides global", func(t *testing.T) {
+		env := testEnv(t)
+		coord := coordWithGlobalSelfAssessment(t, env, nil, global)
+		got := coord.taskAssessmentConfig(config.Agent{TaskSelfAssessment: perAgent})
+		assert.Same(t, perAgent, got)
+	})
+
+	t.Run("falls back to global when per-agent unset", func(t *testing.T) {
+		env := testEnv(t)
+		coord := coordWithGlobalSelfAssessment(t, env, nil, global)
+		got := coord.taskAssessmentConfig(config.Agent{})
+		assert.Same(t, global, got)
+	})
+
+	t.Run("nil when neither is set", func(t *testing.T) {
+		env := testEnv(t)
+		coord := coordWithGlobalSelfAssessment(t, env, nil, nil)
+		got := coord.taskAssessmentConfig(config.Agent{})
+		assert.Nil(t, got)
+	})
+}
+
+// seedThenCompleteTodos returns a run function that, on its first call (the
+// sub-agent's main run, before any todos exist), seeds n incomplete todos on
+// the session, and on each subsequent call (a self-assessment reminder) marks
+// the first still-incomplete todo as completed. It records every prompt seen.
+func seedThenCompleteTodos(t *testing.T, sessions session.Service, n int, prompts *[]string) func(context.Context, SessionAgentCall) (*fantasy.AgentResult, error) {
+	t.Helper()
+	return func(ctx context.Context, call SessionAgentCall) (*fantasy.AgentResult, error) {
+		*prompts = append(*prompts, call.Prompt)
+		sess, err := sessions.Get(ctx, call.SessionID)
+		require.NoError(t, err)
+		if len(sess.Todos) == 0 {
+			sess.Todos = make([]session.Todo, n)
+			for i := range sess.Todos {
+				sess.Todos[i] = session.Todo{
+					Content: fmt.Sprintf("task-%d", i),
+					Status:  session.TodoStatusPending,
+				}
+			}
+		} else {
+			for i := range sess.Todos {
+				if sess.Todos[i].Status != session.TodoStatusCompleted {
+					sess.Todos[i].Status = session.TodoStatusCompleted
+					break
+				}
+			}
+		}
+		_, err = sessions.Save(ctx, sess)
+		require.NoError(t, err)
+		return agentResultWithText("ok"), nil
+	}
+}
+
+func TestRunSubAgentSelfAssessment(t *testing.T) {
+	const providerID = "test-provider"
+	providerCfg := config.ProviderConfig{ID: providerID}
+
+	t.Run("per-agent override runs reminders until todos close", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+		// Global default stays off; the sub-agent enables it via its own config.
+		parent, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		var prompts []string
+		agent := newMockAgent(providerID, 4096, seedThenCompleteTodos(t, env.sessions, 2, &prompts))
+
+		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+			Agent: agent,
+			AgentCfg: config.Agent{
+				EnableTaskSelfAssessment: boolPtr(true),
+				TaskSelfAssessment:       &config.TaskSelfAssessmentConfig{MaxReminders: 10},
+			},
+			SessionID:      parent.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "do work",
+			SessionTitle:   "Sub",
+		})
+		require.NoError(t, err)
+
+		// 1 main run + 2 reminders (one per seeded todo).
+		require.Len(t, prompts, 3)
+		assert.Equal(t, "do work", prompts[0], "first call is the main prompt")
+		assert.Contains(t, prompts[1], "task-0", "reminder lists the unfinished todos")
+
+		// The child session's todos are all closed out.
+		childID := env.sessions.CreateAgentToolSessionID("msg-1", "call-1")
+		child, err := env.sessions.Get(t.Context(), childID)
+		require.NoError(t, err)
+		assert.False(t, session.HasIncompleteTodos(child.Todos))
+	})
+
+	t.Run("per-agent override off suppresses reminders even when global is on", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+		coord.cfg.Config().Options.EnableTaskSelfAssessment = boolPtr(true)
+
+		parent, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		var prompts []string
+		agent := newMockAgent(providerID, 4096, seedThenCompleteTodos(t, env.sessions, 2, &prompts))
+
+		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			AgentCfg:       config.Agent{EnableTaskSelfAssessment: boolPtr(false)},
+			SessionID:      parent.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "do work",
+			SessionTitle:   "Sub",
+		})
+		require.NoError(t, err)
+
+		// Only the main run happened — no reminders, despite incomplete todos.
+		require.Len(t, prompts, 1)
+		childID := env.sessions.CreateAgentToolSessionID("msg-1", "call-1")
+		child, err := env.sessions.Get(t.Context(), childID)
+		require.NoError(t, err)
+		assert.True(t, session.HasIncompleteTodos(child.Todos))
+	})
+
+	t.Run("inherits global enable when no per-agent override", func(t *testing.T) {
+		env := testEnv(t)
+		coord := newTestCoordinator(t, env, providerID, providerCfg)
+		coord.cfg.Config().Options.EnableTaskSelfAssessment = boolPtr(true)
+
+		parent, err := env.sessions.Create(t.Context(), "Parent")
+		require.NoError(t, err)
+
+		var prompts []string
+		agent := newMockAgent(providerID, 4096, seedThenCompleteTodos(t, env.sessions, 2, &prompts))
+
+		_, err = coord.runSubAgent(t.Context(), subAgentParams{
+			Agent:          agent,
+			AgentCfg:       config.Agent{}, // no override -> inherit global
+			SessionID:      parent.ID,
+			AgentMessageID: "msg-1",
+			ToolCallID:     "call-1",
+			Prompt:         "do work",
+			SessionTitle:   "Sub",
+		})
+		require.NoError(t, err)
+
+		// Global default tuning sends a single reminder.
+		require.Len(t, prompts, 2)
 	})
 }
 

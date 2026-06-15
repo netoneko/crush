@@ -304,6 +304,16 @@ type Options struct {
 	// until every task is closed, and target_completion to stop early once a
 	// fraction of todos are done.
 	TaskSelfAssessment *TaskSelfAssessmentConfig `json:"task_self_assessment,omitempty" jsonschema:"description=Tuning for the task self-assessment reminders (requires enable_task_self_assessment). Controls how many reminders to send and when to stop."`
+	// SubagentEnableTaskSelfAssessment overrides EnableTaskSelfAssessment for
+	// the spawned Task sub-agent only. When nil, the sub-agent inherits the
+	// global EnableTaskSelfAssessment value. This lets you run the follow-up
+	// reminders for delegated sub-agent runs independently of the top-level
+	// coder (e.g. on for the sub-agent, off for the coder, or vice versa).
+	SubagentEnableTaskSelfAssessment *bool `json:"subagent_enable_task_self_assessment,omitempty" jsonschema:"description=Override enable_task_self_assessment for the spawned Task sub-agent only. When unset\\, the sub-agent inherits the global value.,default=false"`
+	// SubagentTaskSelfAssessment overrides TaskSelfAssessment tuning for the
+	// spawned Task sub-agent only. When nil, the sub-agent inherits the global
+	// TaskSelfAssessment tuning.
+	SubagentTaskSelfAssessment *TaskSelfAssessmentConfig `json:"subagent_task_self_assessment,omitempty" jsonschema:"description=Override the task self-assessment reminder tuning for the spawned Task sub-agent only. When unset\\, the sub-agent inherits the global tuning."`
 	// CompactTools replaces verbose tool descriptions with shorter versions to
 	// reduce prompt token usage. Useful for local models with smaller context
 	// windows. Affects memory_scroll, memory_list, memory_grep, file_write,
@@ -569,6 +579,18 @@ type Agent struct {
 
 	// Overrides the context paths for this agent
 	ContextPaths []string `json:"context_paths,omitempty"`
+
+	// EnableTaskSelfAssessment overrides Options.EnableTaskSelfAssessment for
+	// this agent. When nil, the global Options value applies. Set it to enable
+	// (or disable) the incomplete-todo follow-up reminders for this agent
+	// independently of the global default — e.g. on for the spawned Task
+	// sub-agent but off for the top-level coder, or vice versa.
+	EnableTaskSelfAssessment *bool `json:"enable_task_self_assessment,omitempty" jsonschema:"description=Per-agent override for enable_task_self_assessment. When unset\\, the global options value applies."`
+
+	// TaskSelfAssessment overrides Options.TaskSelfAssessment for this agent.
+	// When nil, the global Options tuning applies. Requires self-assessment to
+	// be enabled (either here or globally).
+	TaskSelfAssessment *TaskSelfAssessmentConfig `json:"task_self_assessment,omitempty" jsonschema:"description=Per-agent override for the task self-assessment reminder tuning. When unset\\, the global options value applies."`
 }
 
 type Tools struct {
@@ -813,6 +835,13 @@ func (c *Config) SetupAgents() {
 			// sub-agent ALL MCP tools, so it can investigate via MCP-backed data sources.
 			AllowedTools: resolveTaskTools(allowedTools, c.Options.TaskTools),
 			AllowedMCP:   resolveTaskMCP(c.Options.TaskTools),
+			// Sub-agent self-assessment overrides. When these are nil the
+			// coordinator falls back to the global Options values, so an unset
+			// override means "inherit the global default". The coder agent is
+			// left unset here for the same reason — it always resolves against
+			// the global Options directly.
+			EnableTaskSelfAssessment: c.Options.SubagentEnableTaskSelfAssessment,
+			TaskSelfAssessment:       c.Options.SubagentTaskSelfAssessment,
 		},
 	}
 	c.Agents = agents

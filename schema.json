@@ -567,6 +567,15 @@
           "$ref": "#/$defs/TaskSelfAssessmentConfig",
           "description": "Tuning for the task self-assessment reminders (requires enable_task_self_assessment). Controls how many reminders to send and when to stop."
         },
+        "subagent_enable_task_self_assessment": {
+          "type": "boolean",
+          "description": "Override enable_task_self_assessment for the spawned Task sub-agent only. When unset, the sub-agent inherits the global value.",
+          "default": false
+        },
+        "subagent_task_self_assessment": {
+          "$ref": "#/$defs/TaskSelfAssessmentConfig",
+          "description": "Override the task self-assessment reminder tuning for the spawned Task sub-agent only. When unset, the sub-agent inherits the global tuning."
+        },
         "compact_tools": {
           "type": "boolean",
           "description": "Use shorter tool descriptions to reduce prompt token usage. Useful for local/small-context models.",

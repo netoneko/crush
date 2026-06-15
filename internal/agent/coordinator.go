@@ -300,8 +300,9 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 		c.runComplete.PublishMustDeliver(ctx, pubsub.UpdatedEvent, latest)
 	}
 
-	if originalErr == nil && c.taskSelfAssessmentEnabled() {
-		c.runTaskSelfAssessment(ctx, c.currentAgent, SessionAgentCall{
+	coderCfg := c.cfg.Config().Agents[config.AgentCoder]
+	if originalErr == nil && c.taskSelfAssessmentEnabled(coderCfg) {
+		c.runTaskSelfAssessment(ctx, c.currentAgent, coderCfg, SessionAgentCall{
 			SessionID:        sessionID,
 			RunID:            runID,
 			MaxOutputTokens:  maxTokens,
@@ -325,12 +326,8 @@ func (c *coordinator) Run(ctx context.Context, sessionID string, prompt string, 
 // is the loop guard: it bounds the worst case even if the model never
 // closes its tasks. The base call carries the per-run model settings; only
 // the prompt varies per reminder. Returns the number of reminders sent.
-func (c *coordinator) runTaskSelfAssessment(ctx context.Context, agent SessionAgent, base SessionAgentCall) int {
-	var cfg *config.TaskSelfAssessmentConfig
-	if opts := c.cfg.Config().Options; opts != nil {
-		cfg = opts.TaskSelfAssessment
-	}
-	maxReminders, target := resolveTaskAssessmentSettings(cfg)
+func (c *coordinator) runTaskSelfAssessment(ctx context.Context, agent SessionAgent, agentCfg config.Agent, base SessionAgentCall) int {
+	maxReminders, target := resolveTaskAssessmentSettings(c.taskAssessmentConfig(agentCfg))
 
 	sent := 0
 	for sent < maxReminders {
@@ -372,9 +369,29 @@ func resolveTaskAssessmentSettings(cfg *config.TaskSelfAssessmentConfig) (maxRem
 	return maxReminders, target
 }
 
-func (c *coordinator) taskSelfAssessmentEnabled() bool {
+// taskSelfAssessmentEnabled reports whether the incomplete-todo follow-up
+// reminders should run for the given agent. A non-nil per-agent
+// EnableTaskSelfAssessment overrides the global Options value; otherwise the
+// global value (default off) applies.
+func (c *coordinator) taskSelfAssessmentEnabled(agentCfg config.Agent) bool {
+	if agentCfg.EnableTaskSelfAssessment != nil {
+		return *agentCfg.EnableTaskSelfAssessment
+	}
 	opts := c.cfg.Config().Options
 	return opts != nil && opts.EnableTaskSelfAssessment != nil && *opts.EnableTaskSelfAssessment
+}
+
+// taskAssessmentConfig returns the reminder tuning for the given agent. A
+// non-nil per-agent TaskSelfAssessment overrides the global Options tuning;
+// otherwise the global tuning (possibly nil, meaning defaults) applies.
+func (c *coordinator) taskAssessmentConfig(agentCfg config.Agent) *config.TaskSelfAssessmentConfig {
+	if agentCfg.TaskSelfAssessment != nil {
+		return agentCfg.TaskSelfAssessment
+	}
+	if opts := c.cfg.Config().Options; opts != nil {
+		return opts.TaskSelfAssessment
+	}
+	return nil
 }
 
 // buildTaskAssessmentPrompt returns a self-assessment prompt when the todo
@@ -1307,7 +1324,10 @@ func (c *coordinator) refreshApiKeyTemplate(ctx context.Context, providerCfg con
 
 // subAgentParams holds the parameters for running a sub-agent.
 type subAgentParams struct {
-	Agent          SessionAgent
+	Agent SessionAgent
+	// AgentCfg is the static config for the sub-agent, used to resolve
+	// per-agent settings such as task self-assessment.
+	AgentCfg       config.Agent
 	SessionID      string
 	AgentMessageID string
 	ToolCallID     string
@@ -1346,21 +1366,34 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 		return fantasy.ToolResponse{}, errModelProviderNotConfigured
 	}
 
-	// Run the agent
-	result, err := params.Agent.Run(ctx, SessionAgentCall{
+	providerOptions := getProviderOptions(model, providerCfg)
+	// The per-run model settings are shared by the main run and any
+	// self-assessment reminders; only the prompt differs between them.
+	baseCall := SessionAgentCall{
 		SessionID:        session.ID,
-		Prompt:           params.Prompt,
 		MaxOutputTokens:  maxTokens,
-		ProviderOptions:  getProviderOptions(model, providerCfg),
+		ProviderOptions:  providerOptions,
 		Temperature:      model.ModelCfg.Temperature,
 		TopP:             model.ModelCfg.TopP,
 		TopK:             model.ModelCfg.TopK,
 		FrequencyPenalty: model.ModelCfg.FrequencyPenalty,
 		PresencePenalty:  model.ModelCfg.PresencePenalty,
 		NonInteractive:   true,
-	})
+	}
+
+	// Run the agent
+	runCall := baseCall
+	runCall.Prompt = params.Prompt
+	result, err := params.Agent.Run(ctx, runCall)
 	if err != nil {
 		return fantasy.NewTextErrorResponse(fmt.Sprintf("Failed to generate response: %s", err)), nil
+	}
+
+	// Run task self-assessment for the sub-agent when enabled (per-agent
+	// config overrides global Options). This runs before cost propagation so
+	// the reminders' token usage is included in the parent total.
+	if c.taskSelfAssessmentEnabled(params.AgentCfg) {
+		c.runTaskSelfAssessment(ctx, params.Agent, params.AgentCfg, baseCall)
 	}
 
 	// Update parent session cost
