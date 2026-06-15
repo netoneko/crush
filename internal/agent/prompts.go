@@ -36,17 +36,18 @@ func coderCompactPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {
 	return systemPrompt, nil
 }
 
-// coderPromptFromFiles builds the coder system prompt from a user-supplied set of
-// files (concatenated in order) instead of the built-in template. The result is
-// still rendered as a Go text/template, and the auto-discovered context files are
-// suppressed so the injected files are the entire prompt. See Options.PromptPaths.
-func coderPromptFromFiles(paths []string, store *config.ConfigStore, opts ...prompt.Option) (*prompt.Prompt, error) {
+// promptFromFiles builds a system prompt from a user-supplied set of files
+// (concatenated in order) instead of the built-in template. The result is still
+// rendered as a Go text/template, and the auto-discovered context files are
+// suppressed so the injected files are the entire prompt. name is the template
+// name ("coder" or "task"). See Options.PromptPaths / Options.SubagentPromptPaths.
+func promptFromFiles(name string, paths []string, store *config.ConfigStore, opts ...prompt.Option) (*prompt.Prompt, error) {
 	tmpl, err := prompt.ConcatPromptFiles(paths, store)
 	if err != nil {
 		return nil, err
 	}
 	opts = append([]prompt.Option{prompt.WithoutContextFiles()}, opts...)
-	return prompt.NewPrompt("coder", tmpl, opts...)
+	return prompt.NewPrompt(name, tmpl, opts...)
 }
 
 func taskPrompt(opts ...prompt.Option) (*prompt.Prompt, error) {

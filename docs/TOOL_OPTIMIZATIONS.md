@@ -32,6 +32,7 @@ knob see [`TOOLING_IMPROVEMENTS_FOR_LOCAL_MODELS.md`](./TOOLING_IMPROVEMENTS_FOR
 | `compact_prompt` | bool | `false` | Use a shorter system prompt (rules preserved, examples stripped). |
 | `summarize_prompt` | bool | `false` | Async: compress the system prompt with the small model at session start. |
 | `prompt_paths` | []string | — | Files concatenated (in order) to **fully override** the coder system prompt. Rendered as a Go template; suppresses auto-discovered context files. Overrides `compact_prompt`. |
+| `subagent_prompt_paths` | []string | — | Same as `prompt_paths` but overrides the spawned Task **sub-agent** prompt. Independent of `prompt_paths` — neither inherits the other. |
 | `stream_subagent_output` | bool | `false` | In non-interactive mode (`crush run`), stream the live output of spawned sub-agents to stdout, not just the top-level agent's. |
 | `disabled_tools` | []string | — | Built-in tools to disable and hide from **every** agent (coder *and* sub-agent). A disabled tool can never be re-granted by `task_tools`. |
 | `task_tools` | []string | — | Built-in tools the spawned Task sub-agent may call, plus the special `mcp` token for all MCP tools. Unset = read-only default (`glob`/`grep`/`ls`/`sourcegraph`/`view`, no MCP). Intersected with the enabled set, so `disabled_tools` still wins. |
@@ -429,8 +430,9 @@ persona, without forking and rebuilding to edit `coder.md.tpl`.
 
 **What it does.** `prompt_paths` is a list of files that are read, concatenated
 in order (separated by a blank line), and used as the coder system prompt **in
-place of** the built-in template. It applies to the top-level **coder** agent
-(the spawned Task sub-agent keeps its own `task.md.tpl`).
+place of** the built-in template. It applies to the top-level **coder** agent;
+the spawned Task sub-agent has its own independent override, `subagent_prompt_paths`
+(see below).
 
 ```jsonc
 "options": {
@@ -438,7 +440,9 @@ place of** the built-in template. It applies to the top-level **coder** agent
     "prompts/base.md",
     "prompts/house-rules.md",
     "prompts/output-contract.md"
-  ]
+  ],
+  // Optional: override the sub-agent prompt too (independent of the above).
+  "subagent_prompt_paths": ["prompts/subagent.md"]
 }
 ```
 
@@ -472,17 +476,38 @@ variant is irrelevant once you supply your own prompt. `summarize_prompt` still
 works *on top of* an override: the small model compresses whatever the resolved
 base prompt is, including a custom one.
 
+### Sub-agent prompt (`subagent_prompt_paths`)
+
+The spawned Task sub-agent (the `agent` tool the coder delegates to) has its own
+prompt, built from `task.md.tpl`, and its own override key:
+`subagent_prompt_paths`. It has identical semantics to `prompt_paths` (concatenate
+in order, render as a template, suppress context files, hard error on a missing
+file) but applies only to the sub-agent.
+
+The two are **independent** — the coder and the sub-agent are configured
+separately and neither inherits the other's override. So you can give the coder a
+custom prompt while the sub-agent keeps the built-in task prompt (set only
+`prompt_paths`), override just the sub-agent (set only `subagent_prompt_paths`),
+or give each its own (set both). This follows the existing flat `subagent_*`
+convention for sub-agent overrides (e.g. `subagent_enable_task_self_assessment`),
+not a nested block.
+
 ### Where it lives (for maintainers)
 
-- `internal/config/config.go` — `Options.PromptPaths` (the field + schema).
+- `internal/config/config.go` — `Options.PromptPaths` and
+  `Options.SubagentPromptPaths` (the fields + schema).
 - `internal/agent/prompt/prompt.go` — `ConcatPromptFiles` (read + concatenate,
   hard error on missing files) and `WithoutContextFiles` / the `skipContextFiles`
   flag honored in `promptData` (the context-file suppression).
-- `internal/agent/prompts.go` — `coderPromptFromFiles` (builds the coder prompt
-  from the files with `WithoutContextFiles` applied).
-- `internal/agent/coordinator.go` — selection logic: `prompt_paths` →
+- `internal/agent/prompts.go` — `promptFromFiles` (builds a prompt from the files
+  with `WithoutContextFiles` applied; shared by both agents, `name` is
+  `"coder"`/`"task"`).
+- `internal/agent/coordinator.go` — coder selection: `prompt_paths` →
   `compact_prompt` → full default.
-- Tests: `internal/agent/prompt/prompt_override_test.go`.
+- `internal/agent/agent_tool.go` — sub-agent selection: `subagent_prompt_paths` →
+  built-in task prompt.
+- Tests: `internal/agent/prompt/prompt_override_test.go` (the shared mechanism)
+  and `internal/config/prompt_paths_test.go` (config parsing + independence).
 
 ---
 

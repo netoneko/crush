@@ -636,6 +636,16 @@
           "type": "array",
           "description": "Files concatenated (in order) to fully override the coder system prompt. Rendered as a Go text/template (can use {{.WorkingDir}}, {{.GitStatus}}, {{range .ContextFiles}}). Suppresses auto-discovered context files. Overrides compact_prompt."
         },
+        "subagent_prompt_paths": {
+          "items": {
+            "type": "string",
+            "examples": [
+              "prompts/subagent.md"
+            ]
+          },
+          "type": "array",
+          "description": "Files concatenated (in order) to fully override the spawned Task sub-agent's system prompt. Same semantics as prompt_paths but applies only to the sub-agent. Independent of prompt_paths."
+        },
         "summarize_prompt": {
           "type": "boolean",
           "description": "Async: use the small model to compress the system prompt at session start. First turn uses the base prompt; later turns use the summarized version.",

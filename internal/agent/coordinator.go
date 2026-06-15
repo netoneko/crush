@@ -194,7 +194,7 @@ func NewCoordinator(
 	switch {
 	case opts != nil && len(opts.PromptPaths) > 0:
 		promptFn = func(o ...prompt.Option) (*prompt.Prompt, error) {
-			return coderPromptFromFiles(opts.PromptPaths, c.cfg, o...)
+			return promptFromFiles("coder", opts.PromptPaths, c.cfg, o...)
 		}
 	case opts != nil && opts.CompactPrompt:
 		promptFn = coderCompactPrompt

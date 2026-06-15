@@ -355,6 +355,14 @@ type Options struct {
 	// Takes precedence over compact_prompt. Useful for running crush as an
 	// execution engine with a fully custom prompt.
 	PromptPaths []string `json:"prompt_paths,omitempty" jsonschema:"description=Files concatenated (in order) to fully override the coder system prompt. Rendered as a Go text/template (can use {{.WorkingDir}}\\, {{.GitStatus}}\\, {{range .ContextFiles}}). Suppresses auto-discovered context files. Overrides compact_prompt.,example=prompts/base.md,example=prompts/rules.md"`
+	// SubagentPromptPaths is the sub-agent counterpart of PromptPaths: when set,
+	// the listed files are concatenated (in order) and used as the spawned Task
+	// sub-agent's prompt template instead of the built-in task prompt. Same
+	// semantics as PromptPaths (rendered as a Go text/template, auto-discovered
+	// context files suppressed, relative paths resolve against the working dir,
+	// missing file = hard error). Independent of PromptPaths — the coder and the
+	// sub-agent are configured separately; neither inherits the other's override.
+	SubagentPromptPaths []string `json:"subagent_prompt_paths,omitempty" jsonschema:"description=Files concatenated (in order) to fully override the spawned Task sub-agent's system prompt. Same semantics as prompt_paths but applies only to the sub-agent. Independent of prompt_paths.,example=prompts/subagent.md"`
 	// SummarizePrompt runs an async bootstrap step at session start that uses
 	// the small model to further compress the system prompt. The first turn uses
 	// the base prompt (full or compact); subsequent turns use the summarized
