@@ -390,9 +390,9 @@ type MidRunSelfAssessmentConfig struct {
 	// default of 5.
 	RepeatThreshold int `json:"repeat_threshold,omitempty" jsonschema:"description=Trip the nudge once any single tool is called at least this many times within the window. Defaults to 5.,default=5"`
 	// MaxInjections caps how many nudges are injected per run. A value < 1 falls
-	// back to the default of 2. After each injection a cooldown of one full
+	// back to the default of 5. After each injection a cooldown of one full
 	// window must pass before the nudge can trip again.
-	MaxInjections int `json:"max_injections,omitempty" jsonschema:"description=Maximum number of mid-run nudges injected per run. Defaults to 2.,default=2"`
+	MaxInjections int `json:"max_injections,omitempty" jsonschema:"description=Maximum number of mid-run nudges injected per run. Defaults to 5.,default=5"`
 }
 
 type MCPs map[string]MCPConfig

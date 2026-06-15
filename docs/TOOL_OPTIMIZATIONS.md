@@ -197,10 +197,11 @@ catches only *exact* repeats (same tool, same input, same output, >5 times in
 
 **What it does.** With `enable_midrun_self_assessment: true`, the run loop
 watches tool usage over a sliding window of recent steps. When any single tool
-is called at least `repeat_threshold` times within the window, it injects a
-**one-shot, transient** system message into the next step — then lets the run
-continue. The message carries the run's tool-usage stats and asks the model to
-scope tighter or give up:
+is called at least `repeat_threshold` times within the window, it appends a
+**one-shot** nudge to the conversation as a real (persisted) user message on the
+next step — then lets the run continue. It is *not* a transient/vanishing
+message (see "Persisted into history" below for why). The message carries the
+run's tool-usage stats and asks the model to scope tighter or give up:
 
 ```text
 Self-check: you appear to be repeating tool calls without making progress.
@@ -221,7 +222,7 @@ Do not repeat the same call with the same arguments.
     "midrun_self_assessment": {
       "window": 7,           // most recent *steps* inspected (default 7)
       "repeat_threshold": 5, // trip once one tool hits this count in the window (default 5)
-      "max_injections": 2    // cap nudges per run (default 2)
+      "max_injections": 5    // cap nudges per run (default 5)
     },
     // Optional: tune the sub-agent independently. Merges field-by-field over
     // the global tuning, so this only changes the window for the sub-agent.
@@ -238,6 +239,9 @@ Notes:
 
 - **Inject and continue**, not abort — it's a nudge, not a kill switch. The
   hard loop detector still backstops true infinite loops.
+- **`todos` is never counted.** The task-tracking tool is legitimately called
+  many times to mark work done, so it is excluded from the spiral count (see
+  `spiralExcludedTools`) and can't trip the nudge.
 - **Persisted into history, by design.** The nudge is appended as a real user
   message, *not* injected transiently. The agentic loop resends the whole
   conversation each step, and the prompt cache only pays off when each step

@@ -6,14 +6,23 @@ import (
 	"strings"
 
 	"charm.land/fantasy"
+	"github.com/charmbracelet/crush/internal/agent/tools"
 	"github.com/charmbracelet/crush/internal/config"
 )
 
 const (
 	midRunAssessmentWindowDefault    = 7
 	midRunAssessmentThresholdDefault = 5
-	midRunAssessmentMaxInjectDefault = 2
+	midRunAssessmentMaxInjectDefault = 5
 )
+
+// spiralExcludedTools are tools that never count toward spiral detection.
+// The todos tool is excluded because the model legitimately calls it over and
+// over to track and close out tasks — that is progress, not a stuck loop, and
+// counting it would trip the nudge during normal task management.
+var spiralExcludedTools = map[string]bool{
+	tools.TodosToolName: true,
+}
 
 // toolUsageStats summarizes how often each tool was called across a window of
 // steps. It backs the mid-run self-assessment nudge: detection trips on the
@@ -36,6 +45,9 @@ func summarizeToolUsage(steps []fantasy.StepResult, window int) toolUsageStats {
 	}
 	for _, step := range steps {
 		for _, tc := range step.Content.ToolCalls() {
+			if spiralExcludedTools[tc.ToolName] {
+				continue
+			}
 			stats.counts[tc.ToolName]++
 			stats.total++
 		}

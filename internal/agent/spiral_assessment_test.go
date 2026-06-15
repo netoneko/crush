@@ -51,6 +51,22 @@ func TestSummarizeToolUsage_IgnoresTextOnlySteps(t *testing.T) {
 	require.Equal(t, 2, stats.counts["grep"])
 }
 
+func TestSummarizeToolUsage_ExcludesTodos(t *testing.T) {
+	t.Parallel()
+
+	// The todos tool is legitimate task tracking, not a spiral — it must not be
+	// counted, even when called repeatedly.
+	steps := []fantasy.StepResult{
+		step("todos"), step("todos"), step("todos"), step("grep"), step("todos"),
+	}
+	stats := summarizeToolUsage(steps, 10)
+	require.Equal(t, 1, stats.total, "only the non-todos call counts")
+	require.Equal(t, 0, stats.counts["todos"], "todos must be excluded entirely")
+	require.Equal(t, 1, stats.counts["grep"])
+	require.False(t, shouldAssessSpiral(stats, 3),
+		"repeated todos calls must never trip the spiral nudge")
+}
+
 func TestShouldAssessSpiral_TripsOnRepeatThreshold(t *testing.T) {
 	t.Parallel()
 
@@ -140,6 +156,16 @@ func TestInjectMidRunNudge_AppendsToHistoryCacheSafe(t *testing.T) {
 	last := after[len(after)-1]
 	require.Equal(t, message.User, last.Role, "nudge is persisted as a real user message")
 	require.Equal(t, nudge, last.Content().String())
+}
+
+// TestMidRunAssessment_DefaultValues pins the chosen defaults (7 steps, 5 tool
+// calls, 2 injections) so an accidental edit to the constants is caught.
+func TestMidRunAssessment_DefaultValues(t *testing.T) {
+	t.Parallel()
+
+	require.Equal(t, 7, midRunAssessmentWindowDefault, "window: 7 steps")
+	require.Equal(t, 5, midRunAssessmentThresholdDefault, "repeat threshold: 5 tool calls")
+	require.Equal(t, 5, midRunAssessmentMaxInjectDefault, "max injections per run")
 }
 
 func TestResolveMidRunAssessment_DefaultsAndGlobal(t *testing.T) {

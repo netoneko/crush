@@ -318,8 +318,8 @@
         },
         "max_injections": {
           "type": "integer",
-          "description": "Maximum number of mid-run nudges injected per run. Defaults to 2.",
-          "default": 2
+          "description": "Maximum number of mid-run nudges injected per run. Defaults to 5.",
+          "default": 5
         }
       },
       "additionalProperties": false,
