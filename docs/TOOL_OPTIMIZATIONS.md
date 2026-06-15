@@ -33,6 +33,7 @@ knob see [`TOOLING_IMPROVEMENTS_FOR_LOCAL_MODELS.md`](./TOOLING_IMPROVEMENTS_FOR
 | `summarize_prompt` | bool | `false` | Async: compress the system prompt with the small model at session start. |
 | `prompt_paths` | []string | — | Files concatenated (in order) to **fully override** the coder system prompt. Rendered as a Go template; suppresses auto-discovered context files. Overrides `compact_prompt`. |
 | `subagent_prompt_paths` | []string | — | Same as `prompt_paths` but for the spawned Task **sub-agent**. When unset the sub-agent inherits `prompt_paths`; set this only to diverge from the coder. |
+| `subagent_roles` | map[string][]string | — | Named, specialized sub-agent prompts the coder can pick at spawn time. Each role maps to prompt file(s) (same semantics as `prompt_paths`). When set, the coder gains the `list_roles` tool and may pass a `role` argument to the `agent` tool to spawn that role. No role → the normal `subagent_prompt_paths`→`prompt_paths`→built-in resolution. |
 | `stream_subagent_output` | bool | `false` | In non-interactive mode (`crush run`), stream the live output of spawned sub-agents to stdout, not just the top-level agent's. |
 | `disabled_tools` | []string | — | Built-in tools to disable and hide from **every** agent (coder *and* sub-agent). A disabled tool can never be re-granted by `task_tools`. |
 | `task_tools` | []string | — | Built-in tools the spawned Task sub-agent may call, plus the special `mcp` token for all MCP tools. Unset = read-only default (`glob`/`grep`/`ls`/`sourcegraph`/`view`, no MCP). Intersected with the enabled set, so `disabled_tools` still wins. |
@@ -595,6 +596,73 @@ nested block.
   `internal/config/prompt_paths_test.go` (config parsing), and
   `internal/agent/subagent_prompt_test.go` (sub-agent resolution order +
   one-way inheritance).
+
+---
+
+## Sub-agent roles (`subagent_roles` + `list_roles`)
+
+`subagent_prompt_paths` gives the sub-agent **one** fixed prompt. `subagent_roles`
+goes further: it defines **several** named, specialized sub-agent prompts and lets
+the model choose which one to spawn per task.
+
+```jsonc
+{
+  "options": {
+    "subagent_roles": {
+      "reviewer": ["prompts/roles/reviewer.md"],
+      "explorer": ["prompts/roles/explorer.md"],
+      "debugger": ["prompts/base.md", "prompts/roles/debugger.md"]
+    }
+  }
+}
+```
+
+Each value has the **same semantics as `prompt_paths`** (files concatenated in
+order, rendered as a Go template, context files suppressed, hard error on a
+missing file). Multiple files per role are allowed.
+
+**How the model uses it.** A role can reach the `agent` tool three ways:
+
+1. The model calls **`list_roles`** to see the catalog, then passes the chosen name
+   as the `agent` tool's `role` argument.
+2. The system/role prompt or the user tells it to use a specific role; it just
+   passes that `role`.
+3. It passes no `role` and gets the default sub-agent.
+
+**`list_roles`** is a read-only tool that returns the catalog as
+`name: summary` lines (the summary is the first non-blank line of the role's first
+file). It is granted **only to the coder, and only when `subagent_roles` is
+non-empty** — so it never bloats the tool schema when the feature is unused, and it
+never nests into sub-agents.
+
+**Resolution per spawn:**
+
+- `role` set and known → that role's prompt files.
+- `role` empty → the normal default (`subagent_prompt_paths` → `prompt_paths` →
+  built-in `task.md.tpl`).
+- `role` set but unknown → the call returns an error listing the valid role names,
+  so a wrong guess self-corrects without a separate `list_roles` round-trip.
+
+**Concurrency.** Each role is a distinct `SessionAgent` engine, pre-built at tool
+construction (the `agent` tool runs spawns in parallel, so a shared engine whose
+prompt is swapped per call would race). Spawns are otherwise fully isolated — each
+gets its own child session keyed by tool-call ID — so running several roles (or
+several spawns of one role) concurrently does not cross-contaminate prompts,
+context, or transcripts. Roles share only the parent session's cost accumulator,
+whose update is serialized by a mutex (`coordinator.costMu`).
+
+### Where it lives (for maintainers)
+
+- `internal/config/config.go` — `Options.SubagentRoles` (field + schema), the
+  `ListRolesToolName` constant, and the `SetupAgents` logic that grants
+  `list_roles` to the coder only when roles are configured.
+- `internal/agent/prompts.go` — `subagentRoles`, `sortedRoleNames`, and
+  `buildSubAgentFor` (the shared prompt-build + `buildAgent` factory used by the
+  default sub-agent and every role).
+- `internal/agent/agent_tool.go` — the `role` param on `AgentParams`, the per-role
+  pre-built engine map, and role selection at call time.
+- `internal/agent/roles_tool.go` — the `list_roles` tool and `roleSummary`.
+- Tests: `internal/agent/subagent_roles_test.go`.
 
 ---
 

@@ -61,6 +61,11 @@ const (
 	AgentTask  string = "task"
 )
 
+// ListRolesToolName is the name of the tool that lists the configured
+// subagent_roles. Defined here (not in the agent package) so config can grant
+// it to the coder without an import cycle.
+const ListRolesToolName = "list_roles"
+
 type SelectedModel struct {
 	// The model id as used by the provider API.
 	// Required.
@@ -366,6 +371,17 @@ type Options struct {
 	// the coder's. The effective resolution is: subagent_prompt_paths → prompt_paths
 	// → built-in task template.
 	SubagentPromptPaths []string `json:"subagent_prompt_paths,omitempty" jsonschema:"description=Files concatenated (in order) to fully override the spawned Task sub-agent's system prompt. Same semantics as prompt_paths but applies only to the sub-agent. When unset the sub-agent inherits prompt_paths; set this only to diverge from the coder.,example=prompts/subagent.md"`
+	// SubagentRoles maps a role name to the prompt file(s) that define a
+	// specialized Task sub-agent. When non-empty, the coder is granted the
+	// list_roles tool (to discover the catalog) and may pass a `role` argument
+	// to the agent tool naming one of these keys; the spawned sub-agent's system
+	// prompt is then built from that role's files. Each value has the same
+	// semantics as PromptPaths (concatenated in order, rendered as a Go
+	// text/template, auto-discovered context files suppressed, relative paths
+	// resolve against the working dir, missing file = hard error). When the model
+	// passes no role the sub-agent uses the normal resolution
+	// (subagent_prompt_paths → prompt_paths → built-in task template).
+	SubagentRoles map[string][]string `json:"subagent_roles,omitempty" jsonschema:"description=Maps a role name to the prompt file(s) defining a specialized Task sub-agent. When set\\, the coder gets the list_roles tool and may pass a 'role' to the agent tool to spawn that sub-agent. Each value has the same semantics as prompt_paths (concatenated\\, Go-templated\\, context files suppressed)."`
 	// SummarizePrompt runs an async bootstrap step at session start that uses
 	// the small model to further compress the system prompt. The first turn uses
 	// the base prompt (full or compact); subsequent turns use the summarized
@@ -884,6 +900,14 @@ func filterSlice(data []string, mask []string, include bool) []string {
 func (c *Config) SetupAgents() {
 	allowedTools := resolveAllowedTools(allToolNames(), c.Options.DisabledTools)
 
+	// The list_roles tool is only useful when subagent roles are configured, so
+	// grant it to the coder only then (and never if it was explicitly disabled).
+	// Keeping it off by default avoids adding a dead tool to the prompt schema.
+	coderTools := allowedTools
+	if len(c.Options.SubagentRoles) > 0 && !slices.Contains(c.Options.DisabledTools, ListRolesToolName) {
+		coderTools = append(slices.Clone(coderTools), ListRolesToolName)
+	}
+
 	agents := map[string]Agent{
 		AgentCoder: {
 			ID:           AgentCoder,
@@ -891,7 +915,7 @@ func (c *Config) SetupAgents() {
 			Description:  "An agent that helps with executing coding tasks.",
 			Model:        SelectedModelTypeLarge,
 			ContextPaths: c.Options.ContextPaths,
-			AllowedTools: allowedTools,
+			AllowedTools: coderTools,
 		},
 
 		AgentTask: {

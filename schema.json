@@ -646,6 +646,16 @@
           "type": "array",
           "description": "Files concatenated (in order) to fully override the spawned Task sub-agent's system prompt. Same semantics as prompt_paths but applies only to the sub-agent. When unset the sub-agent inherits prompt_paths; set this only to diverge from the coder."
         },
+        "subagent_roles": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "type": "object",
+          "description": "Maps a role name to the prompt file(s) defining a specialized Task sub-agent. When set, the coder gets the list_roles tool and may pass a 'role' to the agent tool to spawn that sub-agent. Each value has the same semantics as prompt_paths (concatenated, Go-templated, context files suppressed)."
+        },
         "summarize_prompt": {
           "type": "boolean",
           "description": "Async: use the small model to compress the system prompt at session start. First turn uses the base prompt; later turns use the summarized version.",

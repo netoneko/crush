@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	_ "embed"
+	"slices"
 
 	"github.com/charmbracelet/crush/internal/agent/prompt"
 	"github.com/charmbracelet/crush/internal/config"
@@ -50,6 +51,44 @@ func resolveSubagentPromptPaths(o *config.Options) []string {
 		return o.SubagentPromptPaths
 	}
 	return o.PromptPaths
+}
+
+// subagentRoles returns the configured role → prompt-files map, or nil. Roles
+// let the coder spawn a specialized Task sub-agent by passing a `role` argument
+// to the agent tool; see Options.SubagentRoles and the list_roles tool.
+func subagentRoles(o *config.Options) map[string][]string {
+	if o == nil {
+		return nil
+	}
+	return o.SubagentRoles
+}
+
+// sortedRoleNames returns the role names in deterministic order, for stable
+// error messages and tool output.
+func sortedRoleNames(roles map[string][]string) []string {
+	names := make([]string, 0, len(roles))
+	for name := range roles {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
+// buildSubAgentFor builds a Task sub-agent whose system prompt comes from the
+// given prompt files. When paths is empty it falls back to the built-in task
+// template. Shared by the default sub-agent and each configured role.
+func (c *coordinator) buildSubAgentFor(ctx context.Context, agentCfg config.Agent, paths []string) (SessionAgent, error) {
+	promptFn := taskPrompt
+	if len(paths) > 0 {
+		promptFn = func(po ...prompt.Option) (*prompt.Prompt, error) {
+			return promptFromFiles("task", paths, c.cfg, po...)
+		}
+	}
+	sysPrompt, err := promptFn(prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	if err != nil {
+		return nil, err
+	}
+	return c.buildAgent(ctx, sysPrompt, agentCfg, true)
 }
 
 // promptFromFiles builds a system prompt from a user-supplied set of files

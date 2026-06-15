@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 
 	"charm.land/catwalk/pkg/catwalk"
 	"charm.land/fantasy"
@@ -112,6 +113,12 @@ type coordinator struct {
 	// It persists across buildTools rebuilds so reference IDs remain valid
 	// after model switches within a session.
 	memoryStore memory.Store
+
+	// costMu serializes parent-session cost accumulation. Sub-agents spawned by
+	// the parallel agent tool finish concurrently and each propagates its cost
+	// to the same parent via a read-modify-write; without this lock concurrent
+	// updates clobber each other and the parent undercounts total cost.
+	costMu sync.Mutex
 
 	readyWg errgroup.Group
 }
@@ -721,6 +728,12 @@ func (c *coordinator) buildTools(ctx context.Context, agent config.Agent, isSubA
 			return nil, err
 		}
 		allTools = append(allTools, agenticFetchTool)
+	}
+
+	// list_roles is granted to the coder only when subagent_roles is configured
+	// (see Config.SetupAgents), so this stays absent when no roles exist.
+	if slices.Contains(agent.AllowedTools, ListRolesToolName) {
+		allTools = append(allTools, c.listRolesTool())
 	}
 
 	// Get the model name for the agent
@@ -1430,11 +1443,17 @@ func (c *coordinator) runSubAgent(ctx context.Context, params subAgentParams) (f
 }
 
 // updateParentSessionCost accumulates the cost from a child session to its parent session.
+// The read-modify-write on the parent is serialized by costMu so concurrent
+// sub-agents (spawned by the parallel agent tool) don't clobber each other's
+// contributions and undercount the parent total.
 func (c *coordinator) updateParentSessionCost(ctx context.Context, childSessionID, parentSessionID string) error {
 	childSession, err := c.sessions.Get(ctx, childSessionID)
 	if err != nil {
 		return fmt.Errorf("get child session: %w", err)
 	}
+
+	c.costMu.Lock()
+	defer c.costMu.Unlock()
 
 	parentSession, err := c.sessions.Get(ctx, parentSessionID)
 	if err != nil {
