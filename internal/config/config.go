@@ -314,6 +314,25 @@ type Options struct {
 	// spawned Task sub-agent only. When nil, the sub-agent inherits the global
 	// TaskSelfAssessment tuning.
 	SubagentTaskSelfAssessment *TaskSelfAssessmentConfig `json:"subagent_task_self_assessment,omitempty" jsonschema:"description=Override the task self-assessment reminder tuning for the spawned Task sub-agent only. When unset\\, the sub-agent inherits the global tuning."`
+	// EnableMidRunSelfAssessment turns on the mid-run nudge that detects a
+	// tool-call spiral (e.g. the same search repeated many times) *during* a
+	// run and injects a one-shot message — carrying the run's tool-usage stats —
+	// asking the model to scope its approach tighter or abandon it. Applies to
+	// the top-level coder and the spawned Task sub-agent (which share the run
+	// loop). Disabled by default.
+	EnableMidRunSelfAssessment *bool `json:"enable_midrun_self_assessment,omitempty" jsonschema:"description=During a run\\, detect a tool-call spiral (e.g. the same search repeated many times) and inject a one-shot nudge with the run's tool-usage stats asking the model to scope tighter or abandon the approach.,default=false"`
+	// MidRunSelfAssessment tunes the mid-run nudge (window, repeat threshold,
+	// max injections). When unset, defaults are used.
+	MidRunSelfAssessment *MidRunSelfAssessmentConfig `json:"midrun_self_assessment,omitempty" jsonschema:"description=Tuning for the mid-run self-assessment nudge (requires enable_midrun_self_assessment). Controls the detection window\\, repeat threshold\\, and how many nudges may be injected per run."`
+	// SubagentEnableMidRunSelfAssessment overrides EnableMidRunSelfAssessment
+	// for the spawned Task sub-agent only. When nil, the sub-agent inherits the
+	// global value.
+	SubagentEnableMidRunSelfAssessment *bool `json:"subagent_enable_midrun_self_assessment,omitempty" jsonschema:"description=Override enable_midrun_self_assessment for the spawned Task sub-agent only. When unset\\, the sub-agent inherits the global value.,default=false"`
+	// SubagentMidRunSelfAssessment overrides MidRunSelfAssessment tuning for the
+	// spawned Task sub-agent only. It merges field-by-field over the global
+	// tuning: set just the fields you want to change for the sub-agent and the
+	// rest are inherited from the global values (then built-in defaults).
+	SubagentMidRunSelfAssessment *MidRunSelfAssessmentConfig `json:"subagent_midrun_self_assessment,omitempty" jsonschema:"description=Override the mid-run self-assessment tuning for the spawned Task sub-agent only. Merges field-by-field over the global tuning: set only the fields you want to change\\, the rest are inherited."`
 	// CompactTools replaces verbose tool descriptions with shorter versions to
 	// reduce prompt token usage. Useful for local models with smaller context
 	// windows. Affects memory_scroll, memory_list, memory_grep, file_write,
@@ -354,6 +373,26 @@ type TaskSelfAssessmentConfig struct {
 	// completed. Values <= 0 or > 1 fall back to the default of 1.0 (every
 	// task must be closed before reminders stop).
 	TargetCompletion float64 `json:"target_completion,omitempty" jsonschema:"description=Stop sending reminders once this fraction (0-1) of todos are completed. Defaults to 1.0 (all tasks).,default=1"`
+}
+
+// MidRunSelfAssessmentConfig tunes the mid-run self-assessment nudge. Unlike
+// task self-assessment (which re-prompts after a run ends), this fires *during*
+// a run when the agent appears to be spiraling on tool calls — e.g. running the
+// same search over and over. When tripped, a one-shot message carrying the
+// run's tool-usage stats is injected into the next step, asking the model to
+// either scope its approach tighter or abandon it, then the run continues.
+type MidRunSelfAssessmentConfig struct {
+	// Window is the number of most recent steps inspected for repetition. A
+	// value < 1 falls back to the default of 7.
+	Window int `json:"window,omitempty" jsonschema:"description=Number of most recent steps inspected when looking for a tool-call spiral. Defaults to 7.,default=7"`
+	// RepeatThreshold trips the nudge once any single tool has been called at
+	// least this many times within the window. A value < 2 falls back to the
+	// default of 5.
+	RepeatThreshold int `json:"repeat_threshold,omitempty" jsonschema:"description=Trip the nudge once any single tool is called at least this many times within the window. Defaults to 5.,default=5"`
+	// MaxInjections caps how many nudges are injected per run. A value < 1 falls
+	// back to the default of 2. After each injection a cooldown of one full
+	// window must pass before the nudge can trip again.
+	MaxInjections int `json:"max_injections,omitempty" jsonschema:"description=Maximum number of mid-run nudges injected per run. Defaults to 2.,default=2"`
 }
 
 type MCPs map[string]MCPConfig

@@ -140,6 +140,15 @@ type sessionAgent struct {
 	messages             message.Service
 	disableAutoSummarize bool
 	isYolo               bool
+
+	// Mid-run self-assessment: when enabled, a tool-call spiral detected during
+	// a run injects a one-shot reflective nudge into the next step (see
+	// spiral_assessment.go) rather than aborting.
+	midRunAssessmentEnabled       bool
+	midRunAssessmentWindow        int
+	midRunAssessmentThreshold     int
+	midRunAssessmentMaxInjections int
+
 	notify               pubsub.Publisher[notify.Notification]
 	runComplete          pubsub.Publisher[notify.RunComplete]
 
@@ -155,7 +164,13 @@ type SessionAgentOptions struct {
 	IsSubAgent           bool
 	DisableAutoSummarize bool
 	IsYolo               bool
-	Sessions             session.Service
+
+	MidRunAssessmentEnabled       bool
+	MidRunAssessmentWindow        int
+	MidRunAssessmentThreshold     int
+	MidRunAssessmentMaxInjections int
+
+	Sessions session.Service
 	Messages             message.Service
 	Tools                []fantasy.AgentTool
 	Notify               pubsub.Publisher[notify.Notification]
@@ -174,6 +189,11 @@ func NewSessionAgent(
 		sessions:             opts.Sessions,
 		messages:             opts.Messages,
 		disableAutoSummarize: opts.DisableAutoSummarize,
+
+		midRunAssessmentEnabled:       opts.MidRunAssessmentEnabled,
+		midRunAssessmentWindow:        opts.MidRunAssessmentWindow,
+		midRunAssessmentThreshold:     opts.MidRunAssessmentThreshold,
+		midRunAssessmentMaxInjections: opts.MidRunAssessmentMaxInjections,
 		tools:                csync.NewSliceFrom(opts.Tools),
 		isYolo:               opts.IsYolo,
 		notify:               opts.Notify,
@@ -346,6 +366,19 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 
 	var stepMessages []fantasy.Message
 	var shouldSummarize bool
+
+	// Mid-run self-assessment state, guarded by sessionLock. spiralSteps
+	// accumulates finished steps so detection can inspect a sliding window;
+	// pendingAssessment holds a nudge detected after a step that the next
+	// PrepareStep will inject; assessmentCooldownAt is the step count after
+	// which detection may trip again (one full window after each injection).
+	var (
+		spiralSteps          []fantasy.StepResult
+		pendingAssessment    string
+		assessmentsInjected  int
+		assessmentCooldownAt int
+	)
+
 	// Don't send MaxOutputTokens if 0 — some providers (e.g. LM Studio) reject it
 	var maxOutputTokens *int64
 	if call.MaxOutputTokens > 0 {
@@ -379,6 +412,25 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					return callContext, prepared, createErr
 				}
 				prepared.Messages = append(prepared.Messages, userMessage.ToAIMessage()...)
+			}
+
+			// Inject a pending mid-run self-assessment nudge (see
+			// injectMidRunNudge for why it is persisted into history rather than
+			// injected transiently). Done here, before the cache-control pass
+			// below, so the moving cache breakpoint lands on it.
+			sessionLock.Lock()
+			nudge := pendingAssessment
+			if nudge != "" {
+				assessmentsInjected++
+				assessmentCooldownAt = len(spiralSteps) + a.midRunAssessmentWindow
+				pendingAssessment = ""
+			}
+			sessionLock.Unlock()
+			if nudge != "" {
+				prepared.Messages, err = a.injectMidRunNudge(callContext, call.SessionID, nudge, prepared.Messages)
+				if err != nil {
+					return callContext, prepared, err
+				}
 			}
 
 			prepared.Messages = a.workaroundProviderMediaLimitations(prepared.Messages, largeModel)
@@ -527,6 +579,22 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			currentAssistant.AddFinish(finishReason, "", "")
 			sessionLock.Lock()
 			defer sessionLock.Unlock()
+
+			// Mid-run self-assessment: accumulate the finished step and, when the
+			// recent window shows a tool-call spiral, queue a one-shot nudge for
+			// the next PrepareStep. Bounded by max injections and a per-window
+			// cooldown so it can't fire every step.
+			if a.midRunAssessmentEnabled {
+				spiralSteps = append(spiralSteps, stepResult)
+				if pendingAssessment == "" &&
+					assessmentsInjected < a.midRunAssessmentMaxInjections &&
+					len(spiralSteps) >= assessmentCooldownAt {
+					stats := summarizeToolUsage(spiralSteps, a.midRunAssessmentWindow)
+					if shouldAssessSpiral(stats, a.midRunAssessmentThreshold) {
+						pendingAssessment = buildSpiralAssessmentPrompt(stats)
+					}
+				}
+			}
 
 			updatedSession, getSessionErr := a.sessions.Get(ctx, call.SessionID)
 			if getSessionErr != nil {
@@ -904,6 +972,39 @@ func (a *sessionAgent) createUserMessage(ctx context.Context, call SessionAgentC
 		return message.Message{}, fmt.Errorf("failed to create user message: %w", err)
 	}
 	return msg, nil
+}
+
+// injectMidRunNudge persists the mid-run self-assessment nudge as a real user
+// message and returns msgs with it appended.
+//
+// Rationale — why it lives in history rather than being injected transiently:
+// the agentic loop sends the whole conversation on every step, and the prompt
+// cache only pays off when each step's request shares a stable prefix with the
+// previous one. Providers cache by longest-matching prefix, so the conversation
+// must only ever GROW — append-only. The cheap, cache-preserving way to steer
+// the model is therefore to append a real, persisted message: the existing
+// prefix (including the large, expensively-cached system prompt) is reused
+// untouched, and only the new tail is processed fresh.
+//
+// The tempting alternative — a one-step-only "transient" message that nudges
+// without polluting history — is exactly what breaks the cache. A transient
+// message that appears on step N and is gone on step N+1 means step N+1's
+// request no longer matches step N's cached tail. Worse, injecting it as a
+// system message (the natural choice for a meta-instruction) gets hoisted into
+// the provider's top-level system block on Anthropic, rewriting the single
+// most valuable cache entry — and then reverting it the next step, so the big
+// system prefix is re-cached TWICE. Persisting a normal user message avoids all
+// of that; the minor cost is that the nudge is visible in the transcript, which
+// is acceptable (and matches how post-run task self-assessment already works).
+func (a *sessionAgent) injectMidRunNudge(ctx context.Context, sessionID, nudge string, msgs []fantasy.Message) ([]fantasy.Message, error) {
+	nudgeMessage, err := a.createUserMessage(ctx, SessionAgentCall{
+		SessionID: sessionID,
+		Prompt:    nudge,
+	})
+	if err != nil {
+		return msgs, err
+	}
+	return append(msgs, nudgeMessage.ToAIMessage()...), nil
 }
 
 func (a *sessionAgent) preparePrompt(msgs []message.Message, supportsImages bool, attachments ...message.Attachment) ([]fantasy.Message, []fantasy.FilePart) {

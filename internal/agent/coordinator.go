@@ -630,19 +630,36 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	}
 
 	largeProviderCfg, _ := c.cfg.Config().Providers.Get(large.ModelCfg.Provider)
+	opts := c.cfg.Config().Options
+	// Sub-agents merge their own overrides over the global mid-run settings;
+	// the top-level coder resolves against the global values alone.
+	var subMidRunEnable *bool
+	var subMidRunCfg *config.MidRunSelfAssessmentConfig
+	if isSubAgent {
+		subMidRunEnable = opts.SubagentEnableMidRunSelfAssessment
+		subMidRunCfg = opts.SubagentMidRunSelfAssessment
+	}
+	midRunOn, midRunWindow, midRunThreshold, midRunMaxInject := resolveMidRunAssessment(
+		subMidRunEnable, subMidRunCfg, opts.EnableMidRunSelfAssessment, opts.MidRunSelfAssessment)
 	result := NewSessionAgent(SessionAgentOptions{
 		LargeModel:           large,
 		SmallModel:           small,
 		SystemPromptPrefix:   largeProviderCfg.SystemPromptPrefix,
 		SystemPrompt:         "",
 		IsSubAgent:           isSubAgent,
-		DisableAutoSummarize: c.cfg.Config().Options.DisableAutoSummarize,
+		DisableAutoSummarize: opts.DisableAutoSummarize,
 		IsYolo:               c.permissions.SkipRequests(),
-		Sessions:             c.sessions,
-		Messages:             c.messages,
-		Tools:                nil,
-		Notify:               c.notify,
-		RunComplete:          c.runComplete,
+
+		MidRunAssessmentEnabled:       midRunOn,
+		MidRunAssessmentWindow:        midRunWindow,
+		MidRunAssessmentThreshold:     midRunThreshold,
+		MidRunAssessmentMaxInjections: midRunMaxInject,
+
+		Sessions:    c.sessions,
+		Messages:    c.messages,
+		Tools:       nil,
+		Notify:      c.notify,
+		RunComplete: c.runComplete,
 	})
 
 	summarizePrompt := c.cfg.Config().Options != nil &&

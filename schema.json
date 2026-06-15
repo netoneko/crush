@@ -304,6 +304,27 @@
       },
       "type": "object"
     },
+    "MidRunSelfAssessmentConfig": {
+      "properties": {
+        "window": {
+          "type": "integer",
+          "description": "Number of most recent steps inspected when looking for a tool-call spiral. Defaults to 7.",
+          "default": 7
+        },
+        "repeat_threshold": {
+          "type": "integer",
+          "description": "Trip the nudge once any single tool is called at least this many times within the window. Defaults to 5.",
+          "default": 5
+        },
+        "max_injections": {
+          "type": "integer",
+          "description": "Maximum number of mid-run nudges injected per run. Defaults to 2.",
+          "default": 2
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "Model": {
       "properties": {
         "id": {
@@ -575,6 +596,24 @@
         "subagent_task_self_assessment": {
           "$ref": "#/$defs/TaskSelfAssessmentConfig",
           "description": "Override the task self-assessment reminder tuning for the spawned Task sub-agent only. When unset, the sub-agent inherits the global tuning."
+        },
+        "enable_midrun_self_assessment": {
+          "type": "boolean",
+          "description": "During a run, detect a tool-call spiral (e.g. the same search repeated many times) and inject a one-shot nudge with the run's tool-usage stats asking the model to scope tighter or abandon the approach.",
+          "default": false
+        },
+        "midrun_self_assessment": {
+          "$ref": "#/$defs/MidRunSelfAssessmentConfig",
+          "description": "Tuning for the mid-run self-assessment nudge (requires enable_midrun_self_assessment). Controls the detection window, repeat threshold, and how many nudges may be injected per run."
+        },
+        "subagent_enable_midrun_self_assessment": {
+          "type": "boolean",
+          "description": "Override enable_midrun_self_assessment for the spawned Task sub-agent only. When unset, the sub-agent inherits the global value.",
+          "default": false
+        },
+        "subagent_midrun_self_assessment": {
+          "$ref": "#/$defs/MidRunSelfAssessmentConfig",
+          "description": "Override the mid-run self-assessment tuning for the spawned Task sub-agent only. Merges field-by-field over the global tuning: set only the fields you want to change, the rest are inherited."
         },
         "compact_tools": {
           "type": "boolean",

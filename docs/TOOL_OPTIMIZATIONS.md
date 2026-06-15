@@ -19,6 +19,10 @@ knob see [`TOOLING_IMPROVEMENTS_FOR_LOCAL_MODELS.md`](./TOOLING_IMPROVEMENTS_FOR
 | `task_self_assessment` | object | — | Tuning for the reminders above (loop count + completion target). |
 | `subagent_enable_task_self_assessment` | bool | — | Override `enable_task_self_assessment` for the spawned Task sub-agent only. Unset = inherit the global value. |
 | `subagent_task_self_assessment` | object | — | Override `task_self_assessment` tuning for the spawned Task sub-agent only. Unset = inherit the global tuning. |
+| `enable_midrun_self_assessment` | bool | `false` | *During* a run, detect a tool-call spiral (same tool repeated) and inject a one-shot nudge with tool-usage stats asking the model to scope tighter or abandon. Applies to the coder and the Task sub-agent. |
+| `midrun_self_assessment` | object | — | Tuning for the nudge above (`window`, `repeat_threshold`, `max_injections`). |
+| `subagent_enable_midrun_self_assessment` | bool | — | Override `enable_midrun_self_assessment` for the spawned Task sub-agent only. Unset = inherit the global value. |
+| `subagent_midrun_self_assessment` | object | — | Override `midrun_self_assessment` for the Task sub-agent only. **Merges field-by-field** over the global tuning — set just the knobs you want to change. |
 | `enable_memory` | bool | `true` | Spill oversized tool results into a queryable memory store instead of the prompt. |
 | `memory_hard_limit_bytes` | int | `8192` | Byte threshold above which a tool result is stored in memory. |
 | `memory_overspill` | float | `0.20` | Slack fraction kept inline before spilling (e.g. `0.20` → up to `hard_limit*1.2`). |
@@ -179,6 +183,96 @@ useful for local models where turns are effectively free and the failure mode
 - Tests: `internal/agent/coordinator_test.go` (resolution + sub-agent loop),
   `internal/config/agent_id_test.go` (SetupAgents wiring),
   `internal/session/session_test.go`.
+
+---
+
+## Mid-run self-assessment (tool-call spiral breaker)
+
+**Problem.** Task self-assessment only fires *after* a run ends, so it can't
+rescue a run that is spiraling in the middle — e.g. a model that keeps running
+the same `grep`/`view` with slightly different arguments, getting nowhere, and
+never stopping on its own. The built-in loop detector (`loop_detection.go`)
+catches only *exact* repeats (same tool, same input, same output, >5 times in
+10 steps) and its only move is to **abort** the run.
+
+**What it does.** With `enable_midrun_self_assessment: true`, the run loop
+watches tool usage over a sliding window of recent steps. When any single tool
+is called at least `repeat_threshold` times within the window, it injects a
+**one-shot, transient** system message into the next step — then lets the run
+continue. The message carries the run's tool-usage stats and asks the model to
+scope tighter or give up:
+
+```text
+Self-check: you appear to be repeating tool calls without making progress.
+Recent tool usage: grep ×6, view ×2 (called grep 6 times).
+
+Stop and reassess before the next call:
+- Restate what you are trying to find and what you have learned so far.
+- If the search is too broad or mis-scoped, narrow it: tighter query, specific paths/globs, or a different tool.
+- If you have already tried several times without success, abandon this approach — proceed with what you know, or report that you could not find it rather than searching again the same way.
+Do not repeat the same call with the same arguments.
+```
+
+```jsonc
+{
+  "$schema": "https://charm.land/crush.json",
+  "options": {
+    "enable_midrun_self_assessment": true,
+    "midrun_self_assessment": {
+      "window": 7,           // most recent *steps* inspected (default 7)
+      "repeat_threshold": 5, // trip once one tool hits this count in the window (default 5)
+      "max_injections": 2    // cap nudges per run (default 2)
+    },
+    // Optional: tune the sub-agent independently. Merges field-by-field over
+    // the global tuning, so this only changes the window for the sub-agent.
+    "subagent_midrun_self_assessment": { "window": 8 }
+  }
+}
+```
+
+> `window` is a count of **steps**, not minutes. It must be ≥ `repeat_threshold`
+> or the nudge can never trip (you can't call a tool more times than there are
+> steps in the window).
+
+Notes:
+
+- **Inject and continue**, not abort — it's a nudge, not a kill switch. The
+  hard loop detector still backstops true infinite loops.
+- **Persisted into history, by design.** The nudge is appended as a real user
+  message, *not* injected transiently. The agentic loop resends the whole
+  conversation each step, and the prompt cache only pays off when each step
+  shares a stable prefix with the last — so history must grow append-only. A
+  transient, vanishing message (especially a system message, which Anthropic
+  hoists into the cached system block) would rewrite the cached prefix and
+  thrash it. The minor cost is that the nudge shows up in the transcript. See
+  `sessionAgent.injectMidRunNudge` for the full rationale.
+- **Bounded.** After each injection a full `window` of steps must pass before it
+  can trip again, and `max_injections` caps the total per run.
+- **Applies to both** the top-level coder and the spawned Task sub-agent — they
+  share the run loop, so a spiraling sub-agent gets nudged too. The sub-agent
+  can be tuned independently via the `subagent_*` keys, which **merge
+  field-by-field** over the global values (set one knob, inherit the rest).
+
+### Where it lives (for maintainers)
+
+- `internal/config/config.go` — `Options.EnableMidRunSelfAssessment`,
+  `Options.MidRunSelfAssessment`, the `subagent_*` overrides
+  (`Options.SubagentEnableMidRunSelfAssessment` /
+  `Options.SubagentMidRunSelfAssessment`), and the `MidRunSelfAssessmentConfig`
+  type.
+- `internal/agent/spiral_assessment.go` — `summarizeToolUsage` (windowed
+  per-tool counts), `shouldAssessSpiral` (trip check), `buildSpiralAssessmentPrompt`
+  (the nudge text), and `resolveMidRunAssessment` (defaults + field-by-field
+  merge of sub-agent over global). `buildAgent` (coordinator.go) passes the
+  sub-agent overrides only when `isSubAgent`.
+- `internal/agent/agent.go` — detection in the `OnStepFinish` hook (accumulates
+  steps, queues a nudge); injection in `PrepareStep` via
+  `sessionAgent.injectMidRunNudge`, which persists the nudge as an appended user
+  message (append-only → cache-safe; see its doc comment) and tracks the
+  injection count and per-window cooldown.
+- Tests: `internal/agent/spiral_assessment_test.go` — includes
+  `TestInjectMidRunNudge_AppendsToHistoryCacheSafe` (asserts the prefix is
+  untouched and history grows append-only) and `..._SubAgentMerging`.
 
 ---
 
