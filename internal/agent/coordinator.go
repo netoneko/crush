@@ -187,16 +187,24 @@ func NewCoordinator(
 	}
 
 	// TODO: make this dynamic when we support multiple agents
+	// prompt_paths fully overrides the coder prompt; otherwise compact_prompt
+	// selects the shorter built-in variant, falling back to the full default.
 	promptFn := coderPrompt
-	if c.cfg.Config().Options != nil && c.cfg.Config().Options.CompactPrompt {
+	opts := c.cfg.Config().Options
+	switch {
+	case opts != nil && len(opts.PromptPaths) > 0:
+		promptFn = func(o ...prompt.Option) (*prompt.Prompt, error) {
+			return coderPromptFromFiles(opts.PromptPaths, c.cfg, o...)
+		}
+	case opts != nil && opts.CompactPrompt:
 		promptFn = coderCompactPrompt
 	}
-	prompt, err := promptFn(prompt.WithWorkingDir(c.cfg.WorkingDir()))
+	sysPrompt, err := promptFn(prompt.WithWorkingDir(c.cfg.WorkingDir()))
 	if err != nil {
 		return nil, err
 	}
 
-	agent, err := c.buildAgent(ctx, prompt, agentCfg, false)
+	agent, err := c.buildAgent(ctx, sysPrompt, agentCfg, false)
 	if err != nil {
 		return nil, err
 	}

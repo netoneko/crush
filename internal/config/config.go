@@ -343,6 +343,18 @@ type Options struct {
 	// explanations, and redundant sections. Saves ~4,500–5,000 tokens.
 	// Recommended for local models with context windows under 64K.
 	CompactPrompt bool `json:"compact_prompt,omitempty" jsonschema:"description=Use a shorter system prompt to reduce token usage. Recommended for local/small-context models.,default=false"`
+	// PromptPaths fully overrides the coder system prompt: when set, the listed
+	// files are concatenated (in order) and used as the coder prompt template
+	// instead of the built-in one. The concatenated content is still run through
+	// the same Go text/template engine, so it may use {{.WorkingDir}},
+	// {{.GitStatus}}, {{range .ContextFiles}}, etc. (plain text passes through
+	// unchanged). When this override is active the auto-discovered context files
+	// (CLAUDE.md, CRUSH.md, AGENTS.md, …) are NOT appended — the injected files
+	// are the whole prompt. Relative paths resolve against the working directory;
+	// ~ and $VARs are expanded. A missing/unreadable file is a hard error.
+	// Takes precedence over compact_prompt. Useful for running crush as an
+	// execution engine with a fully custom prompt.
+	PromptPaths []string `json:"prompt_paths,omitempty" jsonschema:"description=Files concatenated (in order) to fully override the coder system prompt. Rendered as a Go text/template (can use {{.WorkingDir}}\\, {{.GitStatus}}\\, {{range .ContextFiles}}). Suppresses auto-discovered context files. Overrides compact_prompt.,example=prompts/base.md,example=prompts/rules.md"`
 	// SummarizePrompt runs an async bootstrap step at session start that uses
 	// the small model to further compress the system prompt. The first turn uses
 	// the base prompt (full or compact); subsequent turns use the summarized

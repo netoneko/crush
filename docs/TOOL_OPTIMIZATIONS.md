@@ -31,7 +31,10 @@ knob see [`TOOLING_IMPROVEMENTS_FOR_LOCAL_MODELS.md`](./TOOLING_IMPROVEMENTS_FOR
 | `compact_tools` | bool | `false` | Use short tool descriptions to save prompt tokens. |
 | `compact_prompt` | bool | `false` | Use a shorter system prompt (rules preserved, examples stripped). |
 | `summarize_prompt` | bool | `false` | Async: compress the system prompt with the small model at session start. |
+| `prompt_paths` | []string | — | Files concatenated (in order) to **fully override** the coder system prompt. Rendered as a Go template; suppresses auto-discovered context files. Overrides `compact_prompt`. |
 | `stream_subagent_output` | bool | `false` | In non-interactive mode (`crush run`), stream the live output of spawned sub-agents to stdout, not just the top-level agent's. |
+| `disabled_tools` | []string | — | Built-in tools to disable and hide from **every** agent (coder *and* sub-agent). A disabled tool can never be re-granted by `task_tools`. |
+| `task_tools` | []string | — | Built-in tools the spawned Task sub-agent may call, plus the special `mcp` token for all MCP tools. Unset = read-only default (`glob`/`grep`/`ls`/`sourcegraph`/`view`, no MCP). Intersected with the enabled set, so `disabled_tools` still wins. |
 
 A representative local-model config:
 
@@ -280,6 +283,89 @@ Notes:
 
 ---
 
+## Sub-agent tool access (`task_tools`)
+
+**Problem.** The spawned Task sub-agent (the `agent` tool the coder delegates to)
+should not automatically get the coder's full tool belt. By default it is
+**read-only** — it can look around (`glob`/`grep`/`ls`/`sourcegraph`/`view`) but
+cannot run shell commands, edit, or write. To let a sub-agent do real work (e.g.
+run `bash`) you have to grant the tools explicitly.
+
+**What it does.** `task_tools` is the allow-list of built-in tools the sub-agent
+may call, plus the special token `mcp` to grant *all* MCP tools. When it is
+unset, the sub-agent falls back to the read-only set. When it is set, it
+**replaces** that default entirely — so listing `["bash"]` gives the sub-agent
+*only* bash (not bash plus the read-only tools); you must list every tool you
+want.
+
+### How the intersection works
+
+A tool reaches the sub-agent only if it survives **two filters**, applied in this
+order:
+
+1. **`disabled_tools` (exclude, global).** First the full built-in set is
+   filtered down to the *enabled* set: `enabled = allTools − disabled_tools`.
+   This applies to every agent, coder and sub-agent alike. A disabled tool is
+   gone for good.
+2. **`task_tools` (include, sub-agent only).** The sub-agent's tools are then the
+   intersection of the enabled set with `task_tools`:
+   `subagent = enabled ∩ task_tools`. If `task_tools` is unset, the sub-agent
+   instead gets `enabled ∩ {glob, grep, ls, sourcegraph, view}` (the read-only
+   default).
+
+Because step 2 intersects against the *already-filtered* enabled set,
+**`disabled_tools` always wins** — naming a tool in `task_tools` cannot bring
+back something `disabled_tools` removed. Conversely, naming a tool the coder
+never had does nothing: the intersection just drops it.
+
+MCP access is separate from the built-in list: the sub-agent gets MCP tools only
+if `task_tools` contains the literal `"mcp"` token. Without it the sub-agent has
+**no** MCP access regardless of which built-in tools are listed (this preserves
+the historical default).
+
+```text
+allTools ── minus disabled_tools ──▶ enabled set ──┐
+                                                   ├─ ∩ task_tools (or read-only default) ─▶ sub-agent built-in tools
+                                                   │
+"mcp" in task_tools? ── yes ─▶ all MCP tools       │
+                       no  ─▶ no MCP tools          (independent of the above)
+```
+
+### Examples
+
+```jsonc
+// Default (task_tools unset): sub-agent is read-only, no MCP.
+"options": {}
+// sub-agent → glob, grep, ls, sourcegraph, view
+
+// Grant bash plus the usual editing belt, plus all MCP tools.
+"options": {
+  "task_tools": ["bash", "view", "ls", "glob", "grep", "edit", "write", "sourcegraph", "mcp"]
+}
+// sub-agent → bash, view, ls, glob, grep, edit, write, sourcegraph + all MCP
+
+// disabled_tools wins over task_tools.
+"options": {
+  "disabled_tools": ["bash"],
+  "task_tools": ["bash", "view"]
+}
+// sub-agent → view   (bash was removed in step 1 and can't come back)
+```
+
+### Where it lives (for maintainers)
+
+- `internal/config/config.go` — `Options.TaskTools` (the field),
+  `resolveAllowedTools` (step 1, `allTools − disabled_tools`),
+  `resolveReadOnlyTools` (the read-only default set), `resolveTaskTools` (step 2,
+  the intersection / default fallback), and `resolveTaskMCP` (the `mcp` token →
+  all-or-nothing MCP). All are wired together in `SetupAgents`, which sets the
+  Task agent's `AllowedTools` / `AllowedMCP`.
+- `internal/proto/tools.go` — `BashToolName = "bash"` and the other built-in tool
+  name constants used in `task_tools`.
+- Tests: `internal/config/agent_id_test.go` (SetupAgents wiring).
+
+---
+
 ## Memory (oversized tool-result spillover)
 
 **Problem.** Large tool outputs (file reads, greps, command output) bloat the
@@ -330,6 +416,73 @@ models with context windows under ~64K.
 
 `compact_prompt` and `summarize_prompt` stack: compact is the static baseline,
 summarize compresses further at runtime.
+
+---
+
+## Overriding the system prompt (`prompt_paths`)
+
+**Problem.** `compact_prompt` and `summarize_prompt` only *shrink* the built-in
+coder prompt — they can't replace its content. When you run crush as an
+**execution engine** (a fixed, non-interactive `crush run` pipeline) you often
+want a fully custom, deterministic system prompt instead of the stock coder
+persona, without forking and rebuilding to edit `coder.md.tpl`.
+
+**What it does.** `prompt_paths` is a list of files that are read, concatenated
+in order (separated by a blank line), and used as the coder system prompt **in
+place of** the built-in template. It applies to the top-level **coder** agent
+(the spawned Task sub-agent keeps its own `task.md.tpl`).
+
+```jsonc
+"options": {
+  "prompt_paths": [
+    "prompts/base.md",
+    "prompts/house-rules.md",
+    "prompts/output-contract.md"
+  ]
+}
+```
+
+### Behavior
+
+- **Concatenation order is the file order.** Files join with a single blank line
+  between them. The result is the entire prompt.
+- **Rendered as a Go `text/template`.** The concatenated content goes through the
+  same template engine as the built-in prompt, so it can interpolate the same
+  data — `{{.WorkingDir}}`, `{{.Platform}}`, `{{.Date}}`, `{{.GitStatus}}`,
+  `{{.Model}}` / `{{.Provider}}`, `{{.AvailSkillXML}}`, and `{{range .ContextFiles}}`.
+  Plain prose with no `{{…}}` directives passes through unchanged, so a raw
+  Markdown file just works.
+- **Auto-discovered context files are suppressed.** While the override is active,
+  the `context_paths` files (`CLAUDE.md`, `CRUSH.md`, `AGENTS.md`,
+  `.cursorrules`, …) are **not** appended — the injected files are the whole
+  prompt. If you still want project context, reference it explicitly in one of
+  your prompt files (e.g. include a `{{range .ContextFiles}}…{{end}}` block, or
+  just paste the content). This keeps an execution-engine prompt fully
+  self-contained and reproducible.
+- **Paths resolve like context paths.** Relative paths join against the working
+  directory; `~` and `$VARS` are expanded.
+- **Missing files fail loudly.** A path that can't be read is a hard error at
+  startup rather than a silent fallback to the built-in prompt — a typo in an
+  engine config should stop the run, not quietly change the model's behavior.
+
+### Precedence
+
+`prompt_paths` (when non-empty) wins over `compact_prompt` — the compact built-in
+variant is irrelevant once you supply your own prompt. `summarize_prompt` still
+works *on top of* an override: the small model compresses whatever the resolved
+base prompt is, including a custom one.
+
+### Where it lives (for maintainers)
+
+- `internal/config/config.go` — `Options.PromptPaths` (the field + schema).
+- `internal/agent/prompt/prompt.go` — `ConcatPromptFiles` (read + concatenate,
+  hard error on missing files) and `WithoutContextFiles` / the `skipContextFiles`
+  flag honored in `promptData` (the context-file suppression).
+- `internal/agent/prompts.go` — `coderPromptFromFiles` (builds the coder prompt
+  from the files with `WithoutContextFiles` applied).
+- `internal/agent/coordinator.go` — selection logic: `prompt_paths` →
+  `compact_prompt` → full default.
+- Tests: `internal/agent/prompt/prompt_override_test.go`.
 
 ---
 
@@ -392,6 +545,33 @@ Detection uses the agent-tool session-ID format (`messageID$$toolCallID`)
 produced by `session.CreateAgentToolSessionID` (see
 `session.IsAgentToolSessionID`); the labeling lives in
 `format.StreamPrefixer`.
+
+---
+
+## Relaxed tool parameters (fewer required fields)
+
+Weak models frequently stall or mis-call a tool when a *required* parameter
+carries no useful signal for the task — the canonical case is the `bash` tool's
+`description` field. Small models would omit it (schema-invalid call → retry) or
+burn tokens inventing a label before every command. Required fields should be
+the ones the tool genuinely cannot run without.
+
+The tool schemas are generated by reflection over the param structs in
+`internal/agent/tools` (via `charm.land/fantasy`'s `schema.Generate`): a field is
+emitted as **`required`** unless its JSON tag contains **`omitempty`**. So
+relaxing a parameter is a one-tag change.
+
+- **`bash.description` is optional.** `BashParams.Description`
+  (`internal/agent/tools/bash.go`) carries `json:"description,omitempty"`, so the
+  only required field for `bash` is `command`. An omitted description is handled
+  everywhere it is used (the run metadata and the background-job label just get
+  an empty string). This applies to the compact bash tool too — `CompactBashTool`
+  only swaps the description *text*, it reuses the same `BashParams` schema.
+
+If you add or relax a built-in tool parameter, keep `omitempty` in sync with
+what the handler actually needs: validate the genuinely-required fields in the
+handler (e.g. `bash` rejects an empty `command`) and mark everything else
+`omitempty` so a weak model is never forced to supply filler.
 
 ---
 

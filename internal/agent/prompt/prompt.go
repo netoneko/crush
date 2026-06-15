@@ -21,11 +21,12 @@ import (
 
 // Prompt represents a template-based prompt generator.
 type Prompt struct {
-	name       string
-	template   string
-	now        func() time.Time
-	platform   string
-	workingDir string
+	name             string
+	template         string
+	now              func() time.Time
+	platform         string
+	workingDir       string
+	skipContextFiles bool
 }
 
 type PromptDat struct {
@@ -64,6 +65,35 @@ func WithWorkingDir(workingDir string) Option {
 	return func(p *Prompt) {
 		p.workingDir = workingDir
 	}
+}
+
+// WithoutContextFiles suppresses loading of the auto-discovered context files
+// (the configured context_paths, e.g. CLAUDE.md/CRUSH.md/AGENTS.md). Use it when
+// the prompt template is fully self-contained — e.g. a prompt_paths override —
+// so {{.ContextFiles}} is empty and nothing is implicitly appended.
+func WithoutContextFiles() Option {
+	return func(p *Prompt) {
+		p.skipContextFiles = true
+	}
+}
+
+// ConcatPromptFiles reads the given files (in order) and concatenates them into a
+// single template string, separated by a blank line. Paths are resolved like
+// context paths: ~ and $VARs are expanded, and relative paths are joined against
+// the working directory. A missing or unreadable file is a hard error so a
+// misconfigured override fails loudly rather than silently falling back.
+func ConcatPromptFiles(paths []string, store *config.ConfigStore) (string, error) {
+	parts := make([]string, 0, len(paths))
+	for _, pth := range paths {
+		expanded := expandPath(pth, store)
+		fullPath := filepathext.SmartJoin(store.WorkingDir(), expanded)
+		content, err := os.ReadFile(fullPath)
+		if err != nil {
+			return "", fmt.Errorf("reading prompt file %q: %w", fullPath, err)
+		}
+		parts = append(parts, string(content))
+	}
+	return strings.Join(parts, "\n\n"), nil
 }
 
 func NewPrompt(name, promptTemplate string, opts ...Option) (*Prompt, error) {
@@ -154,14 +184,16 @@ func (p *Prompt) promptData(ctx context.Context, provider, model string, store *
 	files := map[string][]ContextFile{}
 
 	cfg := store.Config()
-	for _, pth := range cfg.Options.ContextPaths {
-		expanded := expandPath(pth, store)
-		pathKey := strings.ToLower(expanded)
-		if _, ok := files[pathKey]; ok {
-			continue
+	if !p.skipContextFiles {
+		for _, pth := range cfg.Options.ContextPaths {
+			expanded := expandPath(pth, store)
+			pathKey := strings.ToLower(expanded)
+			if _, ok := files[pathKey]; ok {
+				continue
+			}
+			content := processContextPath(expanded, store)
+			files[pathKey] = content
 		}
-		content := processContextPath(expanded, store)
-		files[pathKey] = content
 	}
 
 	// Discover and load skills metadata.
