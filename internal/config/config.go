@@ -338,6 +338,39 @@ type Options struct {
 	// tuning: set just the fields you want to change for the sub-agent and the
 	// rest are inherited from the global values (then built-in defaults).
 	SubagentMidRunSelfAssessment *MidRunSelfAssessmentConfig `json:"subagent_midrun_self_assessment,omitempty" jsonschema:"description=Override the mid-run self-assessment tuning for the spawned Task sub-agent only. Merges field-by-field over the global tuning: set only the fields you want to change\\, the rest are inherited."`
+	// EnableContextBudget turns on the context-budget nudge: during a run, when
+	// the prompt approaches the model's context window, inject a one-shot message
+	// telling the model to start wrapping up (and, past the hard threshold, to
+	// stop and write its deliverable now). Applies to the top-level coder and the
+	// spawned Task sub-agent. Inert when the model's context window is unknown.
+	// Disabled by default.
+	EnableContextBudget *bool `json:"enable_context_budget,omitempty" jsonschema:"description=During a run\\, watch how full the model's context window is and inject a one-shot nudge to wrap up (soft) or stop and write the deliverable now (hard) as usage crosses thresholds. Inert when the context window is unknown.,default=false"`
+	// ContextBudget tunes the context-budget nudge (warn/hard fraction of the
+	// context window). When unset, defaults are used.
+	ContextBudget *ContextBudgetConfig `json:"context_budget,omitempty" jsonschema:"description=Tuning for the context-budget nudge (requires enable_context_budget). Controls the warn and hard fractions of the context window at which the nudges fire."`
+	// SubagentEnableContextBudget overrides EnableContextBudget for the spawned
+	// Task sub-agent only. When nil, the sub-agent inherits the global value.
+	SubagentEnableContextBudget *bool `json:"subagent_enable_context_budget,omitempty" jsonschema:"description=Override enable_context_budget for the spawned Task sub-agent only. When unset\\, the sub-agent inherits the global value.,default=false"`
+	// SubagentContextBudget overrides ContextBudget tuning for the spawned Task
+	// sub-agent only. It merges field-by-field over the global tuning.
+	SubagentContextBudget *ContextBudgetConfig `json:"subagent_context_budget,omitempty" jsonschema:"description=Override the context-budget tuning for the spawned Task sub-agent only. Merges field-by-field over the global tuning: set only the fields you want to change\\, the rest are inherited."`
+	// EnableTimeBudget turns on the time-budget nudge: during a run, when
+	// wall-clock elapsed crosses a fraction of the configured budget, inject a
+	// one-shot message telling the model to pace itself (and, once the budget is
+	// reached, to stop and write its deliverable now). Requires a budget_minutes
+	// to be set. Applies to the coder and the spawned Task sub-agent. Disabled by
+	// default.
+	EnableTimeBudget *bool `json:"enable_time_budget,omitempty" jsonschema:"description=During a run\\, watch wall-clock elapsed against a budget and inject a one-shot nudge to pace yourself (soft) or stop and write the deliverable now (hard) as time runs out. Requires time_budget.budget_minutes to be set.,default=false"`
+	// TimeBudget tunes the time-budget nudge (budget_minutes + warn fraction).
+	// The nudge stays inert until budget_minutes is set above 0.
+	TimeBudget *TimeBudgetConfig `json:"time_budget,omitempty" jsonschema:"description=Tuning for the time-budget nudge (requires enable_time_budget). Set budget_minutes to the wall-clock budget for a run; warn_percent controls when the soft nudge fires."`
+	// SubagentEnableTimeBudget overrides EnableTimeBudget for the spawned Task
+	// sub-agent only. When nil, the sub-agent inherits the global value.
+	SubagentEnableTimeBudget *bool `json:"subagent_enable_time_budget,omitempty" jsonschema:"description=Override enable_time_budget for the spawned Task sub-agent only. When unset\\, the sub-agent inherits the global value.,default=false"`
+	// SubagentTimeBudget overrides TimeBudget tuning for the spawned Task
+	// sub-agent only. It merges field-by-field over the global tuning — useful to
+	// give a sub-agent investigation a tighter budget than the coder.
+	SubagentTimeBudget *TimeBudgetConfig `json:"subagent_time_budget,omitempty" jsonschema:"description=Override the time-budget tuning for the spawned Task sub-agent only. Merges field-by-field over the global tuning: set only the fields you want to change\\, the rest are inherited."`
 	// CompactTools replaces verbose tool descriptions with shorter versions to
 	// reduce prompt token usage. Useful for local models with smaller context
 	// windows. Affects memory_scroll, memory_list, memory_grep, file_write,
@@ -432,6 +465,38 @@ type MidRunSelfAssessmentConfig struct {
 	// back to the default of 5. After each injection a cooldown of one full
 	// window must pass before the nudge can trip again.
 	MaxInjections int `json:"max_injections,omitempty" jsonschema:"description=Maximum number of mid-run nudges injected per run. Defaults to 5.,default=5"`
+}
+
+// ContextBudgetConfig tunes the context-budget nudge. While
+// enable_context_budget is on, Crush watches how full the model's context
+// window is and injects a one-shot message when usage crosses a threshold: a
+// soft "start wrapping up" at warn_percent and a harder "stop and write your
+// deliverable now" at hard_percent. Each threshold fires at most once per run.
+// Inert when the model's context window is unknown (it can't compute a percent).
+type ContextBudgetConfig struct {
+	// WarnPercent is the fraction (0-1] of the context window at which the soft
+	// "start consolidating" nudge fires. A value <= 0 or > 1 falls back to 0.70.
+	WarnPercent float64 `json:"warn_percent,omitempty" jsonschema:"description=Fraction (0-1) of the context window at which to inject a soft 'start wrapping up' nudge. Defaults to 0.70.,default=0.7"`
+	// HardPercent is the fraction (0-1] of the context window at which the hard
+	// "stop now and write your deliverable" nudge fires. A value <= 0 or > 1
+	// falls back to 0.85.
+	HardPercent float64 `json:"hard_percent,omitempty" jsonschema:"description=Fraction (0-1) of the context window at which to inject a hard 'stop now and write your deliverable' nudge. Defaults to 0.85.,default=0.85"`
+}
+
+// TimeBudgetConfig tunes the time-budget nudge. While enable_time_budget is on
+// and budget_minutes is set, Crush watches wall-clock elapsed for the run and
+// injects a one-shot message when it crosses a threshold: a soft "pace
+// yourself" at warn_percent and a hard "time is up, write your deliverable now"
+// once the budget is reached. Each threshold fires at most once per run. The
+// budget is per run (per user turn for the coder, per spawn for a sub-agent).
+type TimeBudgetConfig struct {
+	// BudgetMinutes is the wall-clock budget for a run, in minutes. There is no
+	// default: a value <= 0 leaves the nudge inert even when enabled.
+	BudgetMinutes float64 `json:"budget_minutes,omitempty" jsonschema:"description=Wall-clock budget for a single run in minutes. No default — the nudge stays inert until this is set above 0."`
+	// WarnPercent is the fraction (0-1] of the budget at which the soft "pace
+	// yourself" nudge fires. A value <= 0 or > 1 falls back to 0.75. The hard
+	// wrap-up nudge always fires once elapsed reaches the full budget.
+	WarnPercent float64 `json:"warn_percent,omitempty" jsonschema:"description=Fraction (0-1) of the time budget at which to inject a soft 'pace yourself' nudge. Defaults to 0.75. The hard wrap-up nudge fires at 100%% of the budget.,default=0.75"`
 }
 
 type MCPs map[string]MCPConfig

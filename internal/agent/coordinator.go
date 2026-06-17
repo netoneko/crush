@@ -650,12 +650,24 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 	// the top-level coder resolves against the global values alone.
 	var subMidRunEnable *bool
 	var subMidRunCfg *config.MidRunSelfAssessmentConfig
+	var subCtxBudgetEnable *bool
+	var subCtxBudgetCfg *config.ContextBudgetConfig
+	var subTimeBudgetEnable *bool
+	var subTimeBudgetCfg *config.TimeBudgetConfig
 	if isSubAgent {
 		subMidRunEnable = opts.SubagentEnableMidRunSelfAssessment
 		subMidRunCfg = opts.SubagentMidRunSelfAssessment
+		subCtxBudgetEnable = opts.SubagentEnableContextBudget
+		subCtxBudgetCfg = opts.SubagentContextBudget
+		subTimeBudgetEnable = opts.SubagentEnableTimeBudget
+		subTimeBudgetCfg = opts.SubagentTimeBudget
 	}
 	midRunOn, midRunWindow, midRunThreshold, midRunMaxInject := resolveMidRunAssessment(
 		subMidRunEnable, subMidRunCfg, opts.EnableMidRunSelfAssessment, opts.MidRunSelfAssessment)
+	ctxBudgetOn, ctxBudgetWarn, ctxBudgetHard := resolveContextBudget(
+		subCtxBudgetEnable, subCtxBudgetCfg, opts.EnableContextBudget, opts.ContextBudget)
+	timeBudgetOn, timeBudgetDur, timeBudgetWarn := resolveTimeBudget(
+		subTimeBudgetEnable, subTimeBudgetCfg, opts.EnableTimeBudget, opts.TimeBudget)
 	result := NewSessionAgent(SessionAgentOptions{
 		LargeModel:           large,
 		SmallModel:           small,
@@ -669,6 +681,13 @@ func (c *coordinator) buildAgent(ctx context.Context, prompt *prompt.Prompt, age
 		MidRunAssessmentWindow:        midRunWindow,
 		MidRunAssessmentThreshold:     midRunThreshold,
 		MidRunAssessmentMaxInjections: midRunMaxInject,
+
+		ContextBudgetEnabled: ctxBudgetOn,
+		ContextBudgetWarn:    ctxBudgetWarn,
+		ContextBudgetHard:    ctxBudgetHard,
+		TimeBudgetEnabled:    timeBudgetOn,
+		TimeBudget:           timeBudgetDur,
+		TimeBudgetWarn:       timeBudgetWarn,
 
 		Sessions:    c.sessions,
 		Messages:    c.messages,

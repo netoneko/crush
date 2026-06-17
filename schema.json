@@ -104,6 +104,22 @@
       "additionalProperties": false,
       "type": "object"
     },
+    "ContextBudgetConfig": {
+      "properties": {
+        "warn_percent": {
+          "type": "number",
+          "description": "Fraction (0-1) of the context window at which to inject a soft 'start wrapping up' nudge. Defaults to 0.70.",
+          "default": 0.7
+        },
+        "hard_percent": {
+          "type": "number",
+          "description": "Fraction (0-1) of the context window at which to inject a hard 'stop now and write your deliverable' nudge. Defaults to 0.85.",
+          "default": 0.85
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
     "HookConfig": {
       "properties": {
         "matcher": {
@@ -615,6 +631,42 @@
           "$ref": "#/$defs/MidRunSelfAssessmentConfig",
           "description": "Override the mid-run self-assessment tuning for the spawned Task sub-agent only. Merges field-by-field over the global tuning: set only the fields you want to change, the rest are inherited."
         },
+        "enable_context_budget": {
+          "type": "boolean",
+          "description": "During a run, watch how full the model's context window is and inject a one-shot nudge to wrap up (soft) or stop and write the deliverable now (hard) as usage crosses thresholds. Inert when the context window is unknown.",
+          "default": false
+        },
+        "context_budget": {
+          "$ref": "#/$defs/ContextBudgetConfig",
+          "description": "Tuning for the context-budget nudge (requires enable_context_budget). Controls the warn and hard fractions of the context window at which the nudges fire."
+        },
+        "subagent_enable_context_budget": {
+          "type": "boolean",
+          "description": "Override enable_context_budget for the spawned Task sub-agent only. When unset, the sub-agent inherits the global value.",
+          "default": false
+        },
+        "subagent_context_budget": {
+          "$ref": "#/$defs/ContextBudgetConfig",
+          "description": "Override the context-budget tuning for the spawned Task sub-agent only. Merges field-by-field over the global tuning: set only the fields you want to change, the rest are inherited."
+        },
+        "enable_time_budget": {
+          "type": "boolean",
+          "description": "During a run, watch wall-clock elapsed against a budget and inject a one-shot nudge to pace yourself (soft) or stop and write the deliverable now (hard) as time runs out. Requires time_budget.budget_minutes to be set.",
+          "default": false
+        },
+        "time_budget": {
+          "$ref": "#/$defs/TimeBudgetConfig",
+          "description": "Tuning for the time-budget nudge (requires enable_time_budget). Set budget_minutes to the wall-clock budget for a run; warn_percent controls when the soft nudge fires."
+        },
+        "subagent_enable_time_budget": {
+          "type": "boolean",
+          "description": "Override enable_time_budget for the spawned Task sub-agent only. When unset, the sub-agent inherits the global value.",
+          "default": false
+        },
+        "subagent_time_budget": {
+          "$ref": "#/$defs/TimeBudgetConfig",
+          "description": "Override the time-budget tuning for the spawned Task sub-agent only. Merges field-by-field over the global tuning: set only the fields you want to change, the rest are inherited."
+        },
         "compact_tools": {
           "type": "boolean",
           "description": "Use shorter tool descriptions to reduce prompt token usage. Useful for local/small-context models.",
@@ -892,6 +944,21 @@
           "type": "number",
           "description": "Stop sending reminders once this fraction (0-1) of todos are completed. Defaults to 1.0 (all tasks).",
           "default": 1
+        }
+      },
+      "additionalProperties": false,
+      "type": "object"
+    },
+    "TimeBudgetConfig": {
+      "properties": {
+        "budget_minutes": {
+          "type": "number",
+          "description": "Wall-clock budget for a single run in minutes. No default — the nudge stays inert until this is set above 0."
+        },
+        "warn_percent": {
+          "type": "number",
+          "description": "Fraction (0-1) of the time budget at which to inject a soft 'pace yourself' nudge. Defaults to 0.75. The hard wrap-up nudge fires at 100%% of the budget.",
+          "default": 0.75
         }
       },
       "additionalProperties": false,

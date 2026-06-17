@@ -149,8 +149,19 @@ type sessionAgent struct {
 	midRunAssessmentThreshold     int
 	midRunAssessmentMaxInjections int
 
-	notify               pubsub.Publisher[notify.Notification]
-	runComplete          pubsub.Publisher[notify.RunComplete]
+	// Context- and time-budget nudges: when enabled, a one-shot reflective nudge
+	// is injected as the run's context fills or its wall-clock budget runs out
+	// (see budget_assessment.go), telling the model to wrap up and write its
+	// deliverable rather than overflow / run long and produce nothing.
+	contextBudgetEnabled bool
+	contextBudgetWarn    float64
+	contextBudgetHard    float64
+	timeBudgetEnabled    bool
+	timeBudget           time.Duration
+	timeBudgetWarn       float64
+
+	notify      pubsub.Publisher[notify.Notification]
+	runComplete pubsub.Publisher[notify.RunComplete]
 
 	messageQueue   *csync.Map[string, []SessionAgentCall]
 	activeRequests *csync.Map[string, context.CancelFunc]
@@ -170,11 +181,18 @@ type SessionAgentOptions struct {
 	MidRunAssessmentThreshold     int
 	MidRunAssessmentMaxInjections int
 
-	Sessions session.Service
-	Messages             message.Service
-	Tools                []fantasy.AgentTool
-	Notify               pubsub.Publisher[notify.Notification]
-	RunComplete          pubsub.Publisher[notify.RunComplete]
+	ContextBudgetEnabled bool
+	ContextBudgetWarn    float64
+	ContextBudgetHard    float64
+	TimeBudgetEnabled    bool
+	TimeBudget           time.Duration
+	TimeBudgetWarn       float64
+
+	Sessions    session.Service
+	Messages    message.Service
+	Tools       []fantasy.AgentTool
+	Notify      pubsub.Publisher[notify.Notification]
+	RunComplete pubsub.Publisher[notify.RunComplete]
 }
 
 func NewSessionAgent(
@@ -194,12 +212,18 @@ func NewSessionAgent(
 		midRunAssessmentWindow:        opts.MidRunAssessmentWindow,
 		midRunAssessmentThreshold:     opts.MidRunAssessmentThreshold,
 		midRunAssessmentMaxInjections: opts.MidRunAssessmentMaxInjections,
-		tools:                csync.NewSliceFrom(opts.Tools),
-		isYolo:               opts.IsYolo,
-		notify:               opts.Notify,
-		runComplete:          opts.RunComplete,
-		messageQueue:         csync.NewMap[string, []SessionAgentCall](),
-		activeRequests:       csync.NewMap[string, context.CancelFunc](),
+		contextBudgetEnabled:          opts.ContextBudgetEnabled,
+		contextBudgetWarn:             opts.ContextBudgetWarn,
+		contextBudgetHard:             opts.ContextBudgetHard,
+		timeBudgetEnabled:             opts.TimeBudgetEnabled,
+		timeBudget:                    opts.TimeBudget,
+		timeBudgetWarn:                opts.TimeBudgetWarn,
+		tools:                         csync.NewSliceFrom(opts.Tools),
+		isYolo:                        opts.IsYolo,
+		notify:                        opts.Notify,
+		runComplete:                   opts.RunComplete,
+		messageQueue:                  csync.NewMap[string, []SessionAgentCall](),
+		activeRequests:                csync.NewMap[string, context.CancelFunc](),
 	}
 }
 
@@ -375,8 +399,20 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 	var (
 		spiralSteps          []fantasy.StepResult
 		pendingAssessment    string
+		pendingIsSpiral      bool
 		assessmentsInjected  int
 		assessmentCooldownAt int
+	)
+
+	// Budget-nudge state: each threshold fires at most once per run. The
+	// context- and time-budget nudges share the pendingAssessment slot with the
+	// spiral nudge (only one is injected per step) but not its cooldown/cap
+	// bookkeeping — see the consume block in PrepareStep.
+	var (
+		contextWarnFired bool
+		contextHardFired bool
+		timeWarnFired    bool
+		timeHardFired    bool
 	)
 
 	// Don't send MaxOutputTokens if 0 — some providers (e.g. LM Studio) reject it
@@ -421,9 +457,14 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 			sessionLock.Lock()
 			nudge := pendingAssessment
 			if nudge != "" {
-				assessmentsInjected++
-				assessmentCooldownAt = len(spiralSteps) + a.midRunAssessmentWindow
+				// The cooldown + injection cap are spiral-specific; the
+				// fire-once budget nudges must not consume against them.
+				if pendingIsSpiral {
+					assessmentsInjected++
+					assessmentCooldownAt = len(spiralSteps) + a.midRunAssessmentWindow
+				}
 				pendingAssessment = ""
+				pendingIsSpiral = false
 			}
 			sessionLock.Unlock()
 			if nudge != "" {
@@ -592,6 +633,7 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 					stats := summarizeToolUsage(spiralSteps, a.midRunAssessmentWindow)
 					if shouldAssessSpiral(stats, a.midRunAssessmentThreshold) {
 						pendingAssessment = buildSpiralAssessmentPrompt(stats)
+						pendingIsSpiral = true
 					}
 				}
 			}
@@ -607,6 +649,40 @@ func (a *sessionAgent) Run(ctx context.Context, call SessionAgentCall) (result *
 				return sessionErr
 			}
 			currentSession = updatedSession
+
+			// Context-budget nudge: once this step's prompt approaches the
+			// model's context window, warn the model to wrap up (and, past the
+			// hard ceiling, to stop and write its deliverable now). Each
+			// threshold fires once; the fired flag is set only on injection, so
+			// a step where the slot is already taken simply retries next step.
+			if a.contextBudgetEnabled && pendingAssessment == "" {
+				if cw := int64(largeModel.CatwalkCfg.ContextWindow); cw > 0 {
+					used := float64(currentSession.CompletionTokens+currentSession.PromptTokens) / float64(cw)
+					switch {
+					case a.contextBudgetHard > 0 && used >= a.contextBudgetHard && !contextHardFired:
+						contextHardFired, contextWarnFired = true, true
+						pendingAssessment = buildContextBudgetPrompt(used, true)
+					case a.contextBudgetWarn > 0 && used >= a.contextBudgetWarn && !contextWarnFired:
+						contextWarnFired = true
+						pendingAssessment = buildContextBudgetPrompt(used, false)
+					}
+				}
+			}
+
+			// Time-budget nudge: same idea keyed on wall-clock elapsed for this
+			// run against the configured budget.
+			if a.timeBudgetEnabled && a.timeBudget > 0 && pendingAssessment == "" {
+				frac := float64(time.Since(startTime)) / float64(a.timeBudget)
+				switch {
+				case frac >= 1.0 && !timeHardFired:
+					timeHardFired, timeWarnFired = true, true
+					pendingAssessment = buildTimeBudgetPrompt(time.Since(startTime), a.timeBudget, true)
+				case a.timeBudgetWarn > 0 && frac >= a.timeBudgetWarn && !timeWarnFired:
+					timeWarnFired = true
+					pendingAssessment = buildTimeBudgetPrompt(time.Since(startTime), a.timeBudget, false)
+				}
+			}
+
 			return a.messages.Update(genCtx, *currentAssistant)
 		},
 		StopWhen: []fantasy.StopCondition{

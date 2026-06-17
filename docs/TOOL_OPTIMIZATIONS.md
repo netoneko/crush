@@ -23,6 +23,14 @@ knob see [`TOOLING_IMPROVEMENTS_FOR_LOCAL_MODELS.md`](./TOOLING_IMPROVEMENTS_FOR
 | `midrun_self_assessment` | object | — | Tuning for the nudge above (`window`, `repeat_threshold`, `max_injections`). |
 | `subagent_enable_midrun_self_assessment` | bool | — | Override `enable_midrun_self_assessment` for the spawned Task sub-agent only. Unset = inherit the global value. |
 | `subagent_midrun_self_assessment` | object | — | Override `midrun_self_assessment` for the Task sub-agent only. **Merges field-by-field** over the global tuning — set just the knobs you want to change. |
+| `enable_context_budget` | bool | `false` | *During* a run, watch how full the model's context window is and inject a one-shot nudge to wrap up (soft) or stop and write the deliverable now (hard) as usage crosses thresholds. Inert when the context window is unknown. Applies to the coder and the Task sub-agent. |
+| `context_budget` | object | — | Tuning for the context-budget nudge (`warn_percent`, `hard_percent` — fractions of the context window). |
+| `subagent_enable_context_budget` | bool | — | Override `enable_context_budget` for the Task sub-agent only. Unset = inherit the global value. |
+| `subagent_context_budget` | object | — | Override `context_budget` for the Task sub-agent only. **Merges field-by-field** over the global tuning. |
+| `enable_time_budget` | bool | `false` | *During* a run, watch wall-clock elapsed against a budget and inject a one-shot nudge to pace yourself (soft) or stop and write the deliverable now (hard). Requires `time_budget.budget_minutes`. Applies to the coder and the Task sub-agent. |
+| `time_budget` | object | — | Tuning for the time-budget nudge (`budget_minutes` — required; `warn_percent` — fraction of the budget). |
+| `subagent_enable_time_budget` | bool | — | Override `enable_time_budget` for the Task sub-agent only. Unset = inherit the global value. |
+| `subagent_time_budget` | object | — | Override `time_budget` for the Task sub-agent only. **Merges field-by-field** over the global tuning (e.g. a tighter budget for sub-agent investigations). |
 | `enable_memory` | bool | `true` | Spill oversized tool results into a queryable memory store instead of the prompt. |
 | `memory_hard_limit_bytes` | int | `8192` | Byte threshold above which a tool result is stored in memory. |
 | `memory_overspill` | float | `0.20` | Slack fraction kept inline before spilling (e.g. `0.20` → up to `hard_limit*1.2`). |
@@ -356,6 +364,106 @@ Notes:
 - Tests: `internal/agent/spiral_assessment_test.go` — includes
   `TestInjectMidRunNudge_AppendsToHistoryCacheSafe` (asserts the prefix is
   untouched and history grows append-only) and `..._SubAgentMerging`.
+
+---
+
+## Budget nudges (context window + wall-clock)
+
+**Problem.** Mid-run self-assessment catches a model *looping* on the same tool,
+but a run can fail two other ways while making genuinely-different calls each
+step: it can **fill the context window** (the prompt grows past `num_ctx`,
+oldest messages get truncated, and the run produces nothing) or simply **run too
+long**. The repeat detector never sees either coming — the calls aren't
+identical. Observed live: a sub-agent issued slightly-varied `query_costs` calls
+while its prompt grew to 187K tokens past a 131K `num_ctx`, overflowing before
+it ever wrote findings.
+
+**What they do.** Two independent nudges, each keyed on resource pressure rather
+than repetition, each firing a softer **warn** at a threshold and a harder
+**stop-and-write** at the ceiling. Like the spiral nudge they *inject and
+continue* (they are not kill switches) and the injected message is persisted
+append-only into history (cache-safe — see the mid-run section for why). Both
+apply to the top-level coder and the spawned Task sub-agent, and both have
+`subagent_*` overrides that **merge field-by-field** over the global tuning.
+
+### Context budget (`enable_context_budget` / `context_budget`)
+
+Watches `prompt + completion` tokens for the latest step against the model's
+context window. When usage crosses `warn_percent` it tells the model to start
+consolidating into its deliverable; past `hard_percent` it tells it to stop
+investigating and write the deliverable now. Each threshold fires **once per
+run**. **Inert when the model's context window is unknown** (`0`) — it can't
+compute a percentage, so nothing fires (this is the common case for some
+local/custom model entries; set the model's `context_window` to enable it).
+
+```jsonc
+"options": {
+  "enable_context_budget": true,
+  "context_budget": {
+    "warn_percent": 0.70,   // soft "start wrapping up" nudge (default 0.70)
+    "hard_percent": 0.85    // hard "stop and write now" nudge (default 0.85)
+  }
+}
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `warn_percent` | `0.70` | Fraction (0–1] of the context window at which the soft nudge fires. Out-of-range → default. |
+| `hard_percent` | `0.85` | Fraction (0–1] of the context window at which the hard nudge fires. Out-of-range → default. |
+
+### Time budget (`enable_time_budget` / `time_budget`)
+
+Watches wall-clock elapsed for the run against `budget_minutes`. At
+`warn_percent` of the budget it asks the model to pace itself; once elapsed
+reaches the full budget it forces a wrap-up. Each threshold fires **once per
+run**. The budget is **per run** — per user turn for the coder, per spawn for a
+sub-agent — so a `subagent_time_budget` is the natural place to bound individual
+investigations. There is **no default `budget_minutes`**: the nudge stays inert
+until you set it above `0`, even with `enable_time_budget: true`.
+
+```jsonc
+"options": {
+  "enable_time_budget": true,
+  "time_budget": {
+    "budget_minutes": 10,   // wall-clock budget for one run (required; no default)
+    "warn_percent": 0.75    // soft "pace yourself" nudge (default 0.75)
+  },
+  // e.g. give each spawned investigation a tighter ceiling than the coder:
+  "subagent_time_budget": { "budget_minutes": 5 }
+}
+```
+
+| Field | Default | Meaning |
+|-------|---------|---------|
+| `budget_minutes` | — | Wall-clock budget for a single run, in minutes. `≤ 0` (or unset) → the nudge never fires. |
+| `warn_percent` | `0.75` | Fraction (0–1] of the budget at which the soft nudge fires. The hard wrap-up nudge always fires at 100% of the budget. Out-of-range → default. |
+
+### Notes
+
+- **One nudge per step.** The context, time, and spiral nudges share a single
+  injection slot, so at most one is injected on any step; if the slot is taken,
+  a tripped budget threshold simply injects on the next step (nothing is lost —
+  the fired-once flag is set only on injection). Budget nudges do **not** consume
+  the spiral nudge's per-run injection cap or cooldown.
+- **Pairs with the spiral nudge.** Enable all three to cover the three failure
+  modes at once: *don't loop* (spiral), *don't overflow* (context), *don't run
+  long* (time) — and in every case leave a written deliverable.
+
+### Where it lives (for maintainers)
+
+- `internal/config/config.go` — `Options.EnableContextBudget` /
+  `Options.ContextBudget` / `Options.EnableTimeBudget` / `Options.TimeBudget`,
+  the `subagent_*` overrides, and the `ContextBudgetConfig` / `TimeBudgetConfig`
+  types.
+- `internal/agent/budget_assessment.go` — `resolveContextBudget` /
+  `resolveTimeBudget` (defaults + field-by-field sub-agent merge) and
+  `buildContextBudgetPrompt` / `buildTimeBudgetPrompt` (the nudge text).
+- `internal/agent/agent.go` — detection in the `OnStepFinish` hook (after the
+  session usage is updated, so the latest token count is available); injection
+  shares the spiral nudge's `pendingAssessment` slot and `injectMidRunNudge`.
+  `buildAgent` (coordinator.go) resolves the settings and passes the sub-agent
+  overrides only when `isSubAgent`.
+- Tests: `internal/agent/budget_assessment_test.go`.
 
 ---
 
